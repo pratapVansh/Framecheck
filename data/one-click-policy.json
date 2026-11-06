@@ -1,0 +1,83 @@
+{
+  "name": "Normal-resolution DIP pilot",
+  "feature_version": "normal-dip-v1",
+  "metrics": {
+    "photo.blur": {
+      "direction": "low",
+      "pass": 0.05653567205979699,
+      "fail": 0.03736962636033562,
+      "fail_validated": false
+    },
+    "photo.noise": {
+      "direction": "high",
+      "pass": 2.2239034175872803,
+      "fail": 4.818457245826721,
+      "fail_validated": true
+    },
+    "photo.contrast": {
+      "direction": "low",
+      "pass": 144.0,
+      "fail": 75.0,
+      "fail_validated": true
+    },
+    "photo.shadow_loss": {
+      "direction": "high",
+      "pass": 0.0,
+      "fail": 2.5,
+      "fail_validated": true
+    },
+    "photo.highlight_loss": {
+      "direction": "high",
+      "pass": 0.0,
+      "fail": 2.5,
+      "fail_validated": true
+    },
+    "product.blur": {
+      "direction": "low",
+      "pass": 0.056667486648303685,
+      "fail": 0.037429271243788115,
+      "fail_validated": false
+    },
+    "product.noise": {
+      "direction": "high",
+      "pass": 1.7297025918960571,
+      "fail": 4.694907009601593,
+      "fail_validated": true
+    }
+  },
+  "calibration_kind": "controlled_source_group_holdout_provisional",
+  "source_categories": [
+    "apparel",
+    "footwear"
+  ],
+  "disclosure": "Provisional pilot: genuine normal-size sources, AI-screened clear labels and synthetic severe defects. Independent natural-defect and broad category validation remain pending.",
+  "source_groups_train": [
+    "blue-flat",
+    "raglan",
+    "shoe",
+    "white-flat"
+  ],
+  "source_groups_test": [
+    "mundu",
+    "white-worn"
+  ],
+  "validation_category_gap": "No independent normal-resolution footwear group is available in the holdout.",
+  "validation_guards": [
+    {
+      "metric": "photo.blur",
+      "false_fail_on_AI_screened_controls": [
+        "mundu-clear"
+      ],
+      "action": "Review only the unsupported Fail region; thresholds unchanged"
+    },
+    {
+      "metric": "product.blur",
+      "false_fail_on_AI_screened_controls": [
+        "mundu-clear"
+      ],
+      "action": "Review only the unsupported Fail region; thresholds unchanged"
+    }
+  ],
+  "guarded_policy_validation": "Original source-disjoint holdout informed safety guards. Do not report its guarded scores as new independent accuracy.",
+  "additional_controlled_holdout_group": "studio-person-session; not used for threshold or guard selection"
+}

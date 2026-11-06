@@ -1,0 +1,57 @@
+# Local environments and generated Python/test files
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.pytest-work/
+.test-tmp/
+.cleanup-backup/
+.coverage
+.coverage.*
+htmlcov/
+*.egg-info/
+build/
+dist/
+
+# Secrets and machine-specific configuration
+.env
+.env.*
+!.env.example
+.streamlit/
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# User photos, databases, datasets, and generated evaluation output stay local.
+# These small, frozen configuration files are required by a fresh checkout.
+/data/*
+!/data/README.md
+!/data/one-click-policy.json
+!/data/quality-v3-profile.json
+!/data/quality-v3-profile.calibration.json
+/reports/
+/submission/
+/plan.md
+/docs/manual-testing.md
+/docs/quality-v3-manual-testing.md
+/docs/validation.md
+*.sqlite3
+*.sqlite3-*
+*.db
+*.log
+*.bak
+*.zip
+
+# Checkpoint metadata is source; pretrained binary weights are local assets.
+/models/*
+!/models/README.md
+!/models/segformer_b2_clothes/
+/models/segformer_b2_clothes/*
+!/models/segformer_b2_clothes/config.json
+!/models/segformer_b2_clothes/preprocessor_config.json
+*.safetensors
+*.pt
+*.pth
+*.onnx

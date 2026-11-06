@@ -1,0 +1,44 @@
+{
+  "name": "Guarded small-photo quality v3",
+  "version": "quality-v3",
+  "require_white": true,
+  "min_short_side": 60,
+  "min_long_side": 80,
+  "white_min_channel": 235,
+  "white_max_spread": 15,
+  "min_white_fraction": 0.9,
+  "max_background_distance": 10.0,
+  "min_coverage": 0.55,
+  "max_coverage": 0.9,
+  "max_center_offset": 0.1,
+  "min_margin": 0.025,
+  "min_sharpness": 0.03385055710177176,
+  "min_contrast": 35.0,
+  "max_noise": 4.200706481933594,
+  "max_dark_fraction": 0.65,
+  "max_bright_fraction": 0.65,
+  "min_exposure_luminance": 35.0,
+  "max_exposure_luminance": 235.0,
+  "review_band": 0.12,
+  "calibration_short_min": 60,
+  "calibration_short_max": 96,
+  "calibration_long_min": 80,
+  "calibration_long_max": 96,
+  "calibrated": true,
+  "calibration_id": "6b73f319d7cb7d08",
+  "sharpness_metric": "laplacian_sobel_ratio",
+  "max_blur_noise": 8.0,
+  "quality_review_bands": {
+    "noise": 0.35,
+    "low_contrast": 0.06,
+    "blur": 0.0,
+    "underexposure": 0.0
+  },
+  "quality_review_reasons": {
+    "overexposure": "Overexposure calibration has insufficient reliable positive detections (validation precision below 80% or no detections). This check needs review; independent checks remain active."
+  },
+  "quality_pass_review_reasons": {
+    "low_contrast": "The score does not establish absence of low contrast: validation recall was 62.8%, below 80%. A potential Pass needs manual review; independently supported defects can still fail.",
+    "blur": "The score does not establish absence of blur: validation recall was 25.0%, below 80%. A potential Pass needs manual review; independently supported defects can still fail."
+  }
+}

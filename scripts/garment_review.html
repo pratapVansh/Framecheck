@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width">
+<title>Framecheck: six shirt references</title>
+<style>
+body{font:16px system-ui;margin:24px;background:#f5f6f8;color:#17212b}main{max-width:1600px;margin:auto}
+h1{font-size:26px}button,input,select,textarea{font:inherit;padding:7px}button{cursor:pointer}button:disabled{cursor:wait}
+.grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}figure{margin:0;background:white;border:1px solid #ccc;padding:10px}
+figure img{display:block;width:100%;height:320px;object-fit:contain;background:#20252b}figcaption{margin-bottom:8px;font-weight:600}
+.tools{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:12px 0}.notice{padding:12px;background:#fff3cd}
+#scroll{height:480px;overflow:auto;background:#20252b}#stage{position:relative;width:100%;line-height:0}#stage img{width:100%;height:auto}
+#paint{position:absolute;inset:0;width:100%;height:100%;touch-action:none;cursor:crosshair}textarea{width:min(95%,900px);height:70px}
+#status{font-weight:bold}a{color:#0658a3}#error{color:#a10000;white-space:pre-wrap}label{display:inline-block}fieldset{margin-top:14px}
+@media(max-width:900px){.grid{grid-template-columns:1fr 1fr}}@media(max-width:600px){.grid{grid-template-columns:1fr}}
+</style>
+<main><h1>Approve the visible shirt, one photo at a time</h1>
+<p class="notice">Proposals are unverified. Five start from a model mask; the rack starts blank. Check against the original at full size.
+Human approval creates a model-assisted reference, not an independent blind benchmark. No IoU is calculated here.</p>
+<div class="tools"><label>Photo <select id="photo" disabled></select></label><span id="progress"></span></div>
+<p id="target"></p><p id="source"></p><p id="status" role="status"></p><p id="error" role="alert"></p>
+<div class="grid">
+<figure><figcaption>1. Original — open for native pixels</figcaption><a id="originalLink" target="_blank" rel="noopener"><img id="original" alt="Original photograph"></a></figure>
+<figure><figcaption>2. Intended shirt — yellow point, not boundary</figcaption><img id="guide" alt="Point identifying the intended garment"></figure>
+<figure><figcaption>3. DIP predicted mask</figcaption><a id="dipLink" target="_blank" rel="noopener"><img id="dip" alt="DIP binary prediction"></a><a id="dipOverlay" target="_blank" rel="noopener">Open DIP overlay</a></figure>
+<figure><figcaption>4. SegFormer predicted mask</figcaption><a id="segLink" target="_blank" rel="noopener"><img id="seg" alt="SegFormer binary prediction"></a><a id="segOverlay" target="_blank" rel="noopener">Open SegFormer overlay</a></figure>
+<figure><figcaption>5. Editable reference — cyan is included</figcaption><div id="scroll"><div id="stage"><img id="backdrop" alt="Original below editable reference"><canvas id="paint" aria-label="Draw the visible shirt with mouse or touch"></canvas></div></div></figure>
+<figure><figcaption>6. Reference binary preview</figcaption><img id="preview" alt="Current editable binary reference"></figure>
+</div>
+<div class="tools">
+<label>Tool <select id="tool"><option value="add">Brush: add fabric</option><option value="erase">Brush: erase</option><option value="polygon-add">Polygon: add fabric</option><option value="polygon-erase">Polygon: erase</option></select></label>
+<label>Brush, native pixels <input id="size" type="number" min="1" max="250" value="24" style="width:70px"></label>
+<label>Zoom <input id="zoom" type="range" min="100" max="400" step="25" value="100"></label>
+<button id="finish" type="button">Finish polygon</button><button id="cancel" type="button">Cancel polygon</button><button id="undo" type="button">Undo</button>
+</div>
+<p>Brush: drag to paint. Polygon: click successive boundary points, then Finish polygon. Use erase polygons for skin, tags, or hangers.
+Black excludes pixels; white includes visible fabric. Include prints and all fabric colours. Leave hidden fabric unfilled.</p>
+<div class="tools"><label>Replace draft with <select id="seed"><option value="pretrained">SegFormer proposal</option><option value="baseline">DIP proposal</option><option value="blank">Blank mask</option></select></label><button id="replace" type="button">Replace editable draft</button></div>
+<fieldset><legend>Human review</legend>
+<p><label>Your name <input id="reviewer" maxlength="120" autocomplete="name"></label></p>
+<label>Corrections or uncertain boundaries<br><textarea id="notes" maxlength="4000"></textarea></label>
+<p><label><input id="confirmed" type="checkbox"> I checked the intended shirt and all visible fabric boundaries, excluded skin/other items, and left occluded regions unfilled.</label></p>
+<div class="tools"><button id="save" type="button">Save unverified draft</button><button id="approve" type="button">Approve reference for this photo</button></div>
+</fieldset><p>Save all six approvals, then tell Codex “All six reference masks are approved.” Edits after approval require a new approval.
+Drafts and approvals are versioned under <code>references/&lt;photo&gt;/</code>. Quality verdicts remain with DIP.</p></main>
+<script>
+'use strict';
+const $ = id => document.getElementById(id);
+const mask = document.createElement('canvas'), m = mask.getContext('2d', {willReadFrequently:true});
+const paint = $('paint'), p = paint.getContext('2d');
+let catalog, active, state, dirty=false, busy=false, seed, undo=[], points=[], drawing=false, last;
+const asset = kind => `/assets/${active.id}/${kind}`;
+function error(e){$('error').textContent=e.message || String(e);}
+function lock(value){busy=value; for(const id of ['photo','save','approve','replace','undo','finish','cancel','tool']) $(id).disabled=value;}
+function changed(){dirty=true;$('confirmed').checked=false;$('status').textContent='Unsaved changes — approval pending';}
+function snapshot(){undo.push(mask.toDataURL());if(undo.length>8)undo.shift();}
+function binary(){const data=m.getImageData(0,0,mask.width,mask.height);for(let i=0;i<data.data.length;i+=4){const v=data.data[i]>=128?255:0;data.data[i]=data.data[i+1]=data.data[i+2]=v;data.data[i+3]=255;}m.putImageData(data,0,0);}
+function redraw(){binary();const data=m.getImageData(0,0,mask.width,mask.height);for(let i=0;i<data.data.length;i+=4){const a=data.data[i]?145:0;data.data[i]=0;data.data[i+1]=220;data.data[i+2]=210;data.data[i+3]=a;}p.clearRect(0,0,paint.width,paint.height);p.putImageData(data,0,0);$('preview').src=mask.toDataURL();}
+async function image(url){return new Promise((resolve,reject)=>{const img=new Image();img.onload=()=>resolve(img);img.onerror=()=>reject(new Error('Image failed: '+url));img.src=url;});}
+async function loadMask(url){const img=await image(url);m.drawImage(img,0,0);redraw();}
+function progress(){$('progress').textContent=`${catalog.cases.filter(c=>c.review.approved).length} / ${catalog.cases.length} approved`;}
+async function choose(id){lock(true);$('error').textContent='';try{
+active=catalog.cases.find(c=>c.id===id);state=active.review;seed=state.seed;points=[];undo=[];
+const [w,h]=active.native_size;mask.width=paint.width=w;mask.height=paint.height=h;
+for(const [element,kind] of [['original','original'],['guide','target-guide'],['dip','baseline-mask'],['seg','pretrained-mask'],['backdrop','original']])$(element).src=asset(kind);
+for(const [element,kind] of [['originalLink','original'],['dipLink','baseline-mask'],['segLink','pretrained-mask'],['dipOverlay','baseline-overlay'],['segOverlay','pretrained-overlay']])$(element).href=asset(kind);
+$('target').textContent=active.target;
+$('source').replaceChildren();const link=document.createElement('a');link.href=active.source_url;link.textContent=`${active.author} — ${active.license}`;link.target='_blank';link.rel='noopener';$('source').append(link,` · ${w} × ${h} native pixels · ${active.context}`);
+$('reviewer').value=state.reviewer || localStorage.getItem('framecheck-reviewer') || '';$('notes').value=state.notes;
+$('confirmed').checked=false;$('seed').value=seed;$('zoom').value=100;$('stage').style.width='100%';
+await loadMask(asset('reference')+'?revision='+state.revision);dirty=false;
+$('status').textContent=state.approved?`Approved revision ${state.revision} by ${state.reviewer}`:`Unverified revision ${state.revision}; initial proposal: ${active.seed}`;
+}catch(e){error(e);}finally{lock(false);}}
+function pointerPosition(event){const r=paint.getBoundingClientRect();return [(event.clientX-r.left)*paint.width/r.width,(event.clientY-r.top)*paint.height/r.height];}
+function stroke(context,a,b,erase,overlay){context.save();context.lineWidth=Math.max(1,Math.min(250,Number($('size').value)||1));context.lineCap='round';context.lineJoin='round';context.globalCompositeOperation=overlay&&erase?'destination-out':'source-over';context.strokeStyle=overlay?'rgba(0,220,210,.57)':erase?'black':'white';context.beginPath();context.moveTo(...a);context.lineTo(...b);context.stroke();context.restore();}
+paint.addEventListener('pointerdown',event=>{if(busy)return;const pos=pointerPosition(event);if($('tool').value.startsWith('polygon')){points.push(pos);p.fillStyle='#ffce00';p.beginPath();p.arc(...pos,Math.max(3,paint.width/200),0,Math.PI*2);p.fill();return;}snapshot();drawing=true;last=pos;paint.setPointerCapture(event.pointerId);changed();stroke(m,pos,[pos[0]+.01,pos[1]],$('tool').value==='erase',false);stroke(p,pos,[pos[0]+.01,pos[1]],$('tool').value==='erase',true);});
+paint.addEventListener('pointermove',event=>{if(!drawing)return;const pos=pointerPosition(event),erase=$('tool').value==='erase';stroke(m,last,pos,erase,false);stroke(p,last,pos,erase,true);last=pos;});
+function end(){if(drawing){drawing=false;redraw();}}
+paint.addEventListener('pointerup',end);paint.addEventListener('pointercancel',end);
+$('finish').onclick=()=>{if(points.length<3){error(new Error('A polygon needs at least three points.'));return;}snapshot();m.fillStyle=$('tool').value==='polygon-erase'?'black':'white';m.beginPath();m.moveTo(...points[0]);for(const pos of points.slice(1))m.lineTo(...pos);m.closePath();m.fill();points=[];changed();redraw();};
+$('cancel').onclick=()=>{points=[];redraw();};$('tool').onchange=()=>{points=[];redraw();};
+$('zoom').oninput=()=>{$('stage').style.width=$('zoom').value+'%';};
+$('undo').onclick=async()=>{if(!undo.length)return;lock(true);try{await loadMask(undo.pop());points=[];changed();}catch(e){error(e);}finally{lock(false);}};
+$('replace').onclick=async()=>{if(!confirm('Replace this editable mask? Undo can restore it.'))return;lock(true);try{snapshot();seed=$('seed').value;points=[];if(seed==='blank'){m.fillStyle='black';m.fillRect(0,0,mask.width,mask.height);redraw();}else await loadMask(asset(seed+'-mask'));changed();}catch(e){error(e);}finally{lock(false);}};
+async function save(approved){$('error').textContent='';if(points.length){error(new Error('Finish or cancel the polygon before saving.'));return;}
+if(approved&&(!$('reviewer').value.trim()||!$('confirmed').checked)){error(new Error('Enter your name and confirm the visible-fabric review.'));return;}
+lock(true);try{binary();const response=await fetch('/save/'+active.id,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({revision:state.revision,mask:mask.toDataURL(),seed,approved,reviewer:$('reviewer').value,notes:$('notes').value,confirmed:$('confirmed').checked})});const result=await response.json();if(!response.ok)throw new Error(result.error);state=active.review=result;dirty=false;localStorage.setItem('framecheck-reviewer',result.reviewer);$('status').textContent=`${result.approved?'Approved reference':'Saved unverified draft'} — revision ${result.revision}`;progress();}catch(e){error(e);}finally{lock(false);}}
+$('save').onclick=()=>save(false);$('approve').onclick=()=>save(true);
+$('notes').oninput=changed;
+$('photo').onchange=()=>{if((dirty||points.length)&&!confirm('Discard unsaved changes and change photo?')){$('photo').value=active.id;return;}choose($('photo').value);};
+window.addEventListener('beforeunload',event=>{if(dirty||points.length){event.preventDefault();event.returnValue='';}});
+(async()=>{try{const response=await fetch('/api');catalog=await response.json();if(!response.ok)throw new Error(catalog.error);for(const c of catalog.cases){const option=document.createElement('option');option.value=c.id;option.textContent=c.id;$('photo').append(option);}progress();await choose(catalog.cases[0].id);}catch(e){error(e);}})();
+</script></html>

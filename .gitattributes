@@ -1,0 +1,15 @@
+* text=auto
+*.md text eol=lf
+*.yml text eol=lf
+*.toml text eol=lf
+
+# Calibration checks the exact bytes of these files. Preserve their existing
+# mixed historical line endings on every operating system and Git checkout.
+/inspector/__init__.py -text
+/inspector/images.py -text
+/inspector/models.py -text
+/inspector/pipeline.py -text
+/inspector/segmentation.py -text
+/data/one-click-policy.json -text
+/data/quality-v3-profile.json -text
+/data/quality-v3-profile.calibration.json -text
