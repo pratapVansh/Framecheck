@@ -3,9 +3,10 @@ import html
 import json
 from uuid import uuid4
 
-from inspector.auto_inspect import CheckResult, aggregate_required as aggregate
+from inspector.auto_inspect import CheckResult, aggregate_required as aggregate, detected_regions
 from inspector.narration import approved_wording
 from inspector.product_forms import marking_form
+from inspector.scoring import LABELS, score_statement
 
 
 def esc(value):return html.escape(str(value),quote=True)
@@ -37,69 +38,121 @@ drop.addEventListener('drop',event=>{{event.preventDefault();drop.classList.remo
 </script>''')
 
 
+CSS += '''
+.review{--ink:#1b3029;--quiet:#748078;--accent:#1c5947;color:var(--ink)}.review-top{display:flex;justify-content:space-between;gap:24px;align-items:end;margin:28px 0}.review-top h1{font-size:36px;letter-spacing:-1.5px;margin:8px 0}.review-top p{font-size:13px}.review-links{display:flex;gap:16px;align-items:center;font-size:13px}.review-overview{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(0,1fr);background:white;border:1px solid var(--line);border-radius:24px;overflow:hidden;box-shadow:0 14px 50px #233b2c07;margin-bottom:32px}.review-photo{min-width:0;margin:0;background:#eaece6;padding:20px;display:flex;flex-direction:column;justify-content:center}.review-photo svg{width:100%;height:auto;max-height:520px;display:block}.review-photo figcaption{display:flex;justify-content:space-between;gap:16px;font-size:12px;margin-top:15px;color:#627068}.score-panel{padding:36px;display:flex;flex-direction:column;justify-content:center;align-items:start;gap:20px}.score-label{font-size:12px;letter-spacing:.12em;text-transform:uppercase;font-weight:700;color:#62786a}.score-value{font-size:96px;line-height:1;font-weight:650;letter-spacing:-6px;font-variant-numeric:tabular-nums}.score-value small{font-size:26px;color:#8b968e;letter-spacing:-1px;font-weight:400;margin-left:8px}.score-panel .verdict{font-size:13px;padding:6px 12px}.score-panel p{font-size:15px;line-height:1.65;margin:0;color:#53655b}.score-coverage{width:100%;padding-top:20px;border-top:1px solid var(--line);font-size:12px;color:#627068}.score-coverage>div{display:flex;justify-content:space-between;gap:12px}.coverage-track{height:5px;border-radius:4px;background:#e9eee7;overflow:hidden;margin:10px 0}.coverage-track span{display:block;height:100%;background:#447b5b}.review-content{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(0,1fr);gap:28px;align-items:start}.review-section-title{display:flex;align-items:baseline;justify-content:space-between;margin-bottom:15px;gap:16px}.review-section-title h2{font-size:21px;margin:0}.review-section-title span{font-size:12px;color:#748078}.product-cards{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}.product-card{background:white;border:1px solid var(--line);border-radius:17px;padding:20px;min-width:0}.product-card .product-head{gap:9px;margin-bottom:17px}.product-card h3{font-size:16px}.product-card .number{height:27px;min-width:27px;font-size:12px;border-radius:8px}.product-card>.pill{margin-bottom:13px}.product-signal{display:flex;justify-content:space-between;gap:8px;padding:8px 0;border-top:1px solid #eff2ec;font-size:12px;color:#647268}.signal-value{color:#305d42;font-weight:600}.signal-value.review-state{color:#986d2b}.signal-value.fail-state{color:#a84b3c}.product-card>a{font-size:12px;display:inline-block;margin-top:13px}.action-card{padding:24px;background:#eaf0e8;border:1px solid #d8e3d6;border-radius:17px}.action-card h2{font-size:21px}.action-item{padding:17px 0;border-bottom:1px solid #d5e0d2}.action-item:last-child{border:0;padding-bottom:0}.action-item h3{font-size:15px;line-height:1.5}.action-item p{font-size:13px;line-height:1.65;color:#5c7162;margin:8px 0}.action-item a{font-size:12px;font-weight:600}.action-scope{display:block;color:#677f6c;font-size:10px;letter-spacing:.08em;text-transform:uppercase;margin-bottom:5px}.review-details{margin-top:30px;padding:4px 24px;background:white;border:1px solid var(--line);border-radius:17px}.review-details>summary{font-size:16px;padding:20px 0;color:#263f31}.review-details>summary span{font-weight:400;color:#7d8981;font-size:12px;margin-left:14px}.review-details[open]{padding-bottom:24px}.detail-section{padding:24px 0;border-top:1px solid var(--line)}.detail-section h3{margin-bottom:12px}.detail-section p{font-size:13px}.context-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}.context-item{display:flex;align-items:start;gap:15px;background:#f5f6f2;padding:15px;border-radius:12px}.region-preview{width:75px;height:85px;flex-shrink:0;background:#e9ece6;border-radius:8px}.context-item h4{margin:0 0 5px;font-size:13px}.context-item p{font-size:12px;margin:0}.evidence-table-wrap{overflow-x:auto}.evidence-table{width:100%;border-collapse:collapse;font-size:12px}.evidence-table th,.evidence-table td{text-align:left;padding:10px 9px;border-bottom:1px solid #edf0e9;vertical-align:top}.evidence-table th{color:#6b7d70;font-weight:600;white-space:nowrap}.evidence-table td:first-child{min-width:155px}.intent-options{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin:15px 0}.intent-choice{display:flex;align-items:center;gap:10px;padding:12px;background:#f4f6f0;border-radius:10px;font-size:13px}.intent-choice input{accent-color:#215a43;width:17px;height:17px;flex-shrink:0}.intent-choice .region-preview{width:45px;height:50px}.review-details fieldset{border:0;padding:0;margin:15px 0}.review-details legend{font-weight:600;font-size:14px}.review-details .evidence{margin:18px 0}.review-details figure{margin:0}.review-details .finding p{font-size:13px}.historical-note{display:flex;gap:15px;align-items:center;justify-content:space-between;background:#faf1de;border:1px solid #eddfbc;border-radius:12px;padding:14px 18px;margin-bottom:20px;font-size:13px}.historical-note p{margin:0}.historical-note button{font-size:12px;white-space:nowrap;padding:9px 13px}.review-footnote{font-size:11px;color:#839085;margin:18px 0}.evidence-link{font-size:12px}.action-item [data-fix]{display:block}.product-card:target{outline:2px solid #669576;outline-offset:4px}
+@media(max-width:850px){.review-overview,.review-content{grid-template-columns:1fr}.review-photo svg{max-height:550px}.score-panel{padding:28px;gap:15px}.score-value{font-size:78px}.review-content{gap:25px}.review-top{margin-top:15px}.review-top h1{font-size:31px}.review-links{flex-direction:column;gap:8px;align-items:end}.score-panel .score-coverage{max-width:none}.review-photo{padding:16px}}@media(max-width:480px){.review-top{align-items:start;gap:12px}.review-top h1{font-size:27px;letter-spacing:-1px}.review-links{font-size:11px}.review-overview{border-radius:17px;margin-bottom:25px}.score-panel{padding:23px}.score-value{font-size:75px}.product-cards,.context-list,.intent-options{grid-template-columns:1fr}.product-card{padding:18px}.review-section-title span{font-size:11px}.review-details{padding:2px 18px}.review-details>summary span{display:block;margin:3px 0 0 18px}.action-card{padding:21px}.historical-note{flex-direction:column;align-items:start}.score-coverage>div{flex-wrap:wrap}}
+'''
+
+
 def numbered_photo(result,identity):
-    w,h=result['width'],result['height'];font=max(22,round(w/28));marks=[]
-    for product in result['segmentation']['products']:
-        x,y,bw,bh=product['bbox'];n=product['number']
-        marks.append(f'<a href="#product-{n}"><rect x="{x}" y="{y}" width="{bw}" height="{bh}" rx="4" fill="none" stroke="#164b3f" stroke-width="{max(2,w//300)}"/><rect x="{x}" y="{y}" width="{font*1.3}" height="{font*1.3}" rx="5" fill="#164b3f"/><text x="{x+font*.25}" y="{y+font}" font-size="{font}" font-weight="700" fill="white">{n}</text></a>')
-    return f'<svg viewBox="0 0 {w} {h}" role="img" aria-label="Uploaded photo with numbered product regions"><image href="/evidence/{identity}/original.png" width="{w}" height="{h}"/>{"".join(marks)}</svg>'
+    w,h=result['width'],result['height'];font=max(22,round(w/35));marks=[]
+    products=[p for p in detected_regions(result['segmentation']) if p.get('intended',True)]
+    for number,product in enumerate(products,1):
+        x,y,_,_=product['bbox']
+        marks.append(f'<a href="#product-{number}" aria-label="View product {number} findings" data-product-number="{number}"><circle cx="{x+font*.7}" cy="{y+font*.7}" r="{font*.68}" fill="#164b3f" stroke="white" stroke-width="2"/><text x="{x+font*.7}" y="{y+font*1.02}" text-anchor="middle" font-size="{font}" font-weight="650" fill="white">{number}</text></a>')
+    return f'<svg viewBox="0 0 {w} {h}" role="img" aria-label="Original photo with intended products numbered"><image href="/evidence/{identity}/original.png" width="{w}" height="{h}"/>{"".join(marks)}</svg>'
+
+
+def region_preview(product,result,identity):
+    x,y,w,h=product['bbox']
+    return f'<svg class="region-preview" viewBox="{x} {y} {w} {h}" role="img" aria-label="{esc(product.get("label","Detected region"))}"><image href="/evidence/{identity}/original.png" width="{result["width"]}" height="{result["height"]}"/></svg>'
 
 
 def render_result(record, error=None):
     result=json.loads(record['result_json']);identity=esc(result['inspection_id']);meta=result['segmentation']
+    regions=detected_regions(meta)
+    products=[p for p in regions if p.get('intended',True)]
+    incidental=[p for p in regions if not p.get('intended',True)]
+    numbers={p.get('region_id',p['number']):n for n,p in enumerate(products,1)}
     wording={item['finding_id']:item for item in approved_wording(result)}
-    def item(check):
-        finding_id=check['identifier'];text=wording[finding_id]['statement'];state=check['status'].lower().replace(' ','-')
-        applicability='' if check.get('required',True) else '<span class="subtle">Advisory / excluded from verdict. </span>'
-        return f'<div class="finding"><span class="dot {state}" aria-label="{esc(check["status"])}"></span><div>{applicability}<p data-finding-id="{esc(finding_id)}" data-statement>{esc(text)}<a class="ref" href="#evidence-{esc(finding_id)}" title="{esc(finding_id)}">Evidence</a></p></div></div>'
-    photo=[c for c in result['checks'] if c['identifier'].startswith('photo.')]
-    cards=['<section class="card"><div class="section-heading"><h2>Photo checks</h2><span class="subtle">Whole photo</span></div>'+''.join(item(c) for c in photo)+'</section>']
-    for product in meta['products']:
-        local=[c for c in result['checks'] if c['identifier'] in product['finding_ids']]
-        intended=product.get('intended',True)
-        state=str(aggregate([CheckResult(**c) for c in local])) if intended else 'Disabled'
-        label=f' · {esc(product["label"])}' if product.get('label') else ''
-        scope='' if intended else '<p class="subtle">Incidental item. Observed findings remain visible but do not affect the verdict.</p>'
-        cards.append(f'<section class="card" id="product-{product["number"]}"><div class="product-head"><span class="number">{product["number"]}</span><h3>Product {product["number"]}{label}</h3>{badge(state)}</div>{scope}'+''.join(item(c) for c in local)+'</section>')
-    fixes=[]
+    checks={c['identifier']:c for c in result['checks']}
+    score=result.get('quality_score')
+    def scope(finding_id):
+        if finding_id.startswith('photo.'):return 'Photo'
+        region=int(finding_id.split('.')[0].split('-')[-1])
+        return f'Product {numbers[region]}' if region in numbers else 'Incidental context'
+    def evidence(check):
+        finding_id=check['identifier'];state=check['status'].lower().replace(' ','-')
+        advisory='' if check.get('required',True) else '<p class="subtle">Context only; excluded from verdict and score.</p>'
+        title=LABELS.get(finding_id.rsplit('.',1)[-1],finding_id)
+        return f'<details id="evidence-{esc(finding_id)}"><summary>{esc(scope(finding_id))} · {esc(title)} · {esc(check["status"])}</summary>{advisory}<div class="finding"><span class="dot {state}"></span><p data-finding-id="{esc(finding_id)}" data-statement>{esc(wording[finding_id]["statement"])}</p></div><pre>{esc(json.dumps(check,indent=2))}</pre></details>'
+    cards=[]
+    for number,product in enumerate(products,1):
+        local=[checks[i] for i in product['finding_ids'] if i in checks]
+        state=str(aggregate([CheckResult(**c) for c in local]))
+        signals=[]
+        for key in ('detail','blur','noise','edge'):
+            check=next((c for c in local if c['identifier'].endswith('.'+key)),None)
+            value='Unassessed' if check is None else check['status']
+            display='Review' if value=='Manual Review' else value
+            color='fail-state' if value=='Fail' else '' if value=='Pass' else 'review-state'
+            signals.append(f'<div class="product-signal"><span>{esc(LABELS[key])}</span><span class="signal-value {color}">{esc(display)}</span></div>')
+        first=product['finding_ids'][0]
+        label=esc(product.get('label','Product region'))
+        cards.append(f'<article class="product-card" id="product-{number}" data-intended-product="{number}"><div class="product-head"><span class="number">{number}</span><h3>{label}</h3></div>{badge(state)}{"".join(signals)}<a href="#evidence-{esc(first)}">View DIP evidence</a></article>')
+    # Group repeated advice by defect; uncertainty stays conditional and evidence-bound.
+    actions={}
     for check in result['checks']:
-        if check.get('required',True) and check['status'] not in {'Pass','Disabled'}:
-            finding_id=check['identifier'];word=wording[finding_id]
-            label='Photo' if finding_id.startswith('photo.') else 'Product '+finding_id.split('.')[0].split('-')[-1]
-            fixes.append(f'<div class="fix"><b>{label}</b><span data-finding-id="{esc(finding_id)}" data-fix>{esc(word["fix"])}</span><a class="ref" href="#evidence-{esc(finding_id)}">Evidence</a></div>')
-    coverage=meta['coverage'];incomplete=not coverage['coverage_complete'];count=len(meta['products'])
-    question=''
+        if not check.get('required',True) or check['status'] in {'Pass','Disabled'}:continue
+        key=check['identifier'].rsplit('.',1)[-1]
+        if check.get('reason_code') in {'intended_group_unconfirmed','intended_group_missing','intended_coverage_unconfirmed'}:key='coverage'
+        if key not in actions:actions[key]=[]
+        actions[key].append(check)
+    ordered=sorted(actions.items(),key=lambda pair:(0 if any(c['status']=='Fail' for c in pair[1]) else 1 if pair[0]=='edge' else 3 if pair[0]=='coverage' else 2))
+    action_titles={'blur':'Check focus at full size','noise':'Check visible noise','edge':'Give the product more room',
+                   'coverage':'Confirm the intended products','resolution':'Use a larger original photo',
+                   'contrast':'Check product contrast','clipping':'Review bright and dark detail',
+                   'mask_completeness':'Check the full product outline','shadow_loss':'Restore dark detail',
+                   'highlight_loss':'Restore highlight detail','group_size':'Adjust the product framing',
+                   'group_placement':'Recenter the product group','group_margins':'Leave space around the products','detail':'Check product detail'}
+    fixes=[]
+    for key,group in ordered[:3]:
+        check=next((c for c in group if c['status']=='Fail'),group[0]);fid=check['identifier']
+        scopes=', '.join(dict.fromkeys(scope(c['identifier']) for c in group))
+        link='#coverage-question' if key=='coverage' else '#evidence-'+esc(fid)
+        fixes.append(f'<div class="action-item"><span class="action-scope">{esc(scopes)}</span><h3>{esc(action_titles.get(key,"Review this finding"))}</h3><p data-finding-id="{esc(fid)}" data-fix>{esc(wording[fid]["fix"])}</p><a href="{link}">Review evidence and next steps</a></div>')
+    fix_html=''.join(fixes) or '<p>No fixes are suggested for the assessed checks.</p>'
+    count=len(products)
+    coverage=meta['coverage']
+    score_value=f'{score["score"]}<small>/ 100</small>' if score else '<small>Not scored</small>'
+    explanation=score_statement(score) if score else 'This saved inspection predates whole-photo scoring. Reinspect the original to use the current rules.'
+    coverage_html=(f'<div class="score-coverage"><div><span>Assessed coverage</span><strong>{score["assessed_coverage_percent"]}% of weighted checks</strong></div><div class="coverage-track" aria-hidden="true"><span style="width:{score["assessed_coverage_percent"]}%"></span></div><span>{score["uncertainty_withheld"]} points await review · <a href="#score-evidence">How scoring works</a></span></div>' if score else '')
+    old=''
+    if meta.get('report_schema_version')!=2:
+        old=f'<div class="historical-note"><p>Saved with earlier inspection rules. Original findings are preserved.</p><form method="post" action="/reinspect" enctype="multipart/form-data"><input type="hidden" name="source_inspection_id" value="{identity}"><input type="hidden" name="submission_id" value="{uuid4()}"><button>Reinspect this photo</button></form></div>'
+    contexts=''.join(f'<article class="context-item">{region_preview(p,result,identity)}<div><h4>{esc(p.get("label","Detected region"))} · incidental</h4><p>{esc(p.get("intent_reason","Excluded by the saved intended-product selection."))}</p><a class="evidence-link" href="#evidence-{esc(p["finding_ids"][0])}">View retained findings</a></div></article>' for p in incidental)
+    context_section=f'<section class="detail-section" id="incidental-context"><h3>Incidental context · {len(incidental)}</h3><p>Retained as scene evidence. These regions do not count as products or affect product scoring.</p><div class="context-list">{contexts}</div></section>' if incidental else ''
+    choices=[]
+    for p in regions:
+        region=p.get('region_id',p['number'])
+        title=f'Product {numbers[region]}' if region in numbers else 'Incidental context'
+        choices.append(f'<label class="intent-choice"><input type="checkbox" name="intended_{region}" value="yes" {"checked" if p.get("intended",True) else ""}>{region_preview(p,result,identity)}<span>{title}<br>{esc(p.get("label","Detected region"))}</span></label>')
+    confirm=f'<form method="post" action="/confirm-coverage" enctype="multipart/form-data"><input type="hidden" name="source_inspection_id" value="{identity}"><input type="hidden" name="submission_id" value="{uuid4()}"><input type="hidden" name="intent_selection" value="yes"><fieldset><legend>Which visible items are intended products?</legend><div class="intent-options">{"".join(choices)}</div></fieldset><button type="submit" name="coverage_confirm" value="yes">Save intended products</button><p>Creates a new report. This confirms intent and coverage; it does not verify mask accuracy or clear quality findings.</p></form>' if regions else '<p>Mark an intended product before confirming coverage.</p>'
     virtual={**result,'segmentation':{**meta,'product_locator':{}}}
     mark=marking_form(virtual).replace('Mark the target product','Mark a missing or merged product')
-    choices=''.join(f'<label style="display:block"><input type="checkbox" name="intended_{p["number"]}" value="yes" {"checked" if p.get("intended",True) else ""}> Product {p["number"]}{" — "+esc(p["label"]) if p.get("label") else ""}</label>' for p in meta['products'])
-    confirm=f'''<form method="post" action="/confirm-coverage" enctype="multipart/form-data"><input type="hidden" name="source_inspection_id" value="{identity}"><input type="hidden" name="submission_id" value="{uuid4()}"><input type="hidden" name="intent_selection" value="yes"><fieldset><legend>Which numbered items are intended products?</legend>{choices}</fieldset><p>Uncheck incidental items. Mark missing products, or mark individual products if a numbered region merges several items, then exclude the merged candidate.</p><p>Confirming the intended items does not verify mask accuracy or clear quality findings.</p><button type="submit" name="coverage_confirm" value="yes">Save intended items and confirm numbering</button></form>''' if count else '<p>Mark at least one intended product before confirming coverage.</p>'
-    if incomplete:
-        question=f'<section class="card" id="coverage-question"><h2>Confirm intended products</h2><p>All available photo and product findings are shown. Foreground accounting does not establish intended-product coverage.</p>{confirm}<details><summary>Mark a missing or merged product</summary>{mark}</details></section>'
-    else:
-        question=f'<details class="card"><summary>Change intended items or mark another product</summary>{confirm}{mark}</details>'
-    details=''.join(f'<details id="evidence-{esc(c["identifier"])}"><summary>{esc(c["identifier"])} · {esc(c["status"])}</summary><pre>{esc(json.dumps(c,indent=2))}</pre></details>' for c in result['checks'])
-    scope_text='Intended-product coverage unconfirmed' if incomplete else ('Intended items confirmed' if coverage.get('user_confirmed') else 'Estimated scan coverage complete')
+    override=f'<section class="detail-section"><details id="coverage-question"><summary>Override intended products or confirm coverage</summary><p>Automatic intent uses prominence, framing, and apparent completeness. Dominant cropped products remain eligible. Override the estimate if your intended subject differs.</p>{confirm}<details><summary>Mark a missing or merged product</summary>{mark}</details></details></section>'
+    ledger=''
+    if score:
+        rows=[]
+        for c in score['components']:
+            links=' '.join(f'<a href="#evidence-{esc(fid)}">{esc(scope(fid))}</a>' for fid in c['finding_ids'])
+            rows.append(f'<tr><td>{esc(LABELS[c["component"].split(".")[1]])}</td><td>{c["weight"]}</td><td>{c["earned"]}</td><td>{c["deducted"]}</td><td>{c["withheld"]}</td><td>{links or "No product region"}</td></tr>')
+        ledger=f'<section class="detail-section" id="score-evidence"><h3>Score deductions and uncertainty</h3><p>{score["confirmed_deductions"]} points deducted for confirmed findings. {score["uncertainty_withheld"]} withheld for uncertainty. Possible range: {score["possible_range"][0]}–{score["possible_range"][1]}/100. Missing checks earn no credit.</p><p>{esc(score["method"])}</p><div class="evidence-table-wrap"><table class="evidence-table"><thead><tr><th>DIP check</th><th>Weight</th><th>Earned</th><th>Deducted</th><th>Withheld</th><th>Evidence</th></tr></thead><tbody>{"".join(rows)}</tbody></table></div><p>{esc(score["limitation"])}</p></section>'
     error_notice=f'<p role="alert" class="notice error">{esc(error)}</p>' if error else ''
-    return page('Inspection result',f'''{error_notice}<div class="result-head"><div><span class="eyebrow">Inspection result</span><h1>Your photo, checked.</h1><p>{count} numbered product region{'' if count==1 else 's'} · DIP verdict</p></div>{badge(result['status'],'verdict')}</div><div class="coverage {'incomplete' if incomplete else ''}"><strong>{scope_text}.</strong> {esc(coverage['reason'])} {esc(coverage['disclosure'])}</div><div class="result-grid"><aside class="photo-panel card">{numbered_photo(result,identity)}<p class="subtle">Numbers match each product's findings. <a href="/evidence/{identity}/original.png" target="_blank" rel="noopener">Open original</a></p><p class="subtle">Pilot calibration is provisional; broad natural-photo validation remains pending.</p><p><a class="button" href="/">Inspect another photo</a></p></aside><div><h2>What we found</h2>{''.join(cards)}<section class="card"><h2>How to fix it</h2>{''.join(fixes) if fixes else '<p>No fixes are suggested for the completed checks.</p>'}</section>{question}</div></div><details class="card details"><summary>Details · masks, scores, thresholds and calibration</summary><p id="explanation-source" class="source">Local wording · available immediately</p><p>{esc(meta['calibration_disclosure'])}</p><p>{esc(record['filename'])} · {result['width']} × {result['height']} pixels</p><div class="evidence"><figure><img src="/evidence/{identity}/mask.png" alt="Inspection mask"><figcaption>Combined mask of all numbered regions</figcaption></figure><figure><img src="/evidence/{identity}/overlay.png" alt="Inspection overlay"><figcaption>Estimated regions</figcaption></figure></div>{details}<p><a href="/report/{identity}.json">Download structured DIP report</a></p><a href="/?advanced=1">Advanced manual inspection tools</a></details><script>
+    return page('Photo review',f'''<div class="review">{error_notice}<div class="review-top"><div><span class="eyebrow">Inspection complete</span><h1>Your photo review.</h1><p>{esc(record['filename'])}</p></div><div class="review-links"><a href="/report/{identity}.json">Download report</a><a href="/">Inspect another photo</a></div></div>{old}<section class="review-overview" id="whole-photo-score"><figure class="review-photo">{numbered_photo(result,identity)}<figcaption><span>Original photo · {count} intended product{'' if count==1 else 's'}</span><a href="/evidence/{identity}/original.png" target="_blank" rel="noopener">Open original</a></figcaption></figure><div class="score-panel"><span class="score-label">Whole-photo quality</span><div class="score-value" data-quality-score>{score_value}</div>{badge(score['verdict'] if score else result['status'],'verdict')}<p id="score-explanation">{esc(explanation)}</p>{coverage_html}</div></section><div class="review-content"><section><div class="review-section-title"><h2>Intended products</h2><span data-product-count="{count}">{count} product{'' if count==1 else 's'} assessed</span></div><div class="product-cards">{''.join(cards) or '<p>No intended products located. Available photo findings remain under Details.</p>'}</div></section><section class="action-card"><h2>What to do next</h2>{fix_html}</section></div><details class="review-details" id="inspection-details"><summary>Details <span>Incidental items, uncertainty &amp; DIP evidence</span></summary>{context_section}{override}{ledger}<section class="detail-section"><h3>Findings and measurements</h3><p>{esc(coverage['reason'])} {esc(coverage['disclosure'])}</p>{''.join(evidence(c) for c in result['checks'])}</section><section class="detail-section"><h3>Masks and calibration</h3><p>{esc(meta['calibration_disclosure'])}</p><div class="evidence"><figure><img src="/evidence/{identity}/mask.png" alt="Combined detection mask, including incidental regions"><figcaption>All detected regions, including context</figcaption></figure><figure><img src="/evidence/{identity}/overlay.png" alt="Estimated detection regions"><figcaption>Estimated masks, not verified outlines</figcaption></figure></div><p class="source" id="explanation-source">Local wording · available immediately</p><a href="/?advanced=1">Advanced manual inspection tools</a></section></details><p class="review-footnote">DIP evidence determines this provisional assessment. Photo and product checks keep their calibration limits.</p></div><script>
+document.addEventListener('click',event=>{{
+ const anchor=event.target.closest('a[href^="#"]');if(!anchor)return;
+ const target=document.getElementById(anchor.getAttribute('href').slice(1));if(!target)return;
+ for(let node=target;node;node=node.parentElement)if(node.tagName==='DETAILS')node.open=true;
+ requestAnimationFrame(()=>{{target.scrollIntoView({{behavior:matchMedia('(prefers-reduced-motion: reduce)').matches?'auto':'smooth',block:'start'}});}});
+}});
 fetch('/explanation/{identity}.json').then(r=>r.ok?r.json():Promise.reject()).then(data=>{{
  for(const item of data.items){{
-  for(const node of document.querySelectorAll('[data-statement]'))if(node.dataset.findingId===item.finding_id){{node.firstChild.textContent=item.statement;}}
+  for(const node of document.querySelectorAll('[data-statement]'))if(node.dataset.findingId===item.finding_id)node.textContent=item.statement;
   for(const node of document.querySelectorAll('[data-fix]'))if(node.dataset.findingId===item.finding_id)node.textContent=item.fix;
  }}
- const reasons={{
-  not_configured:'Local wording · Save GROQ_API_KEY in .env, then refresh this result.',
-  configuration_unreadable:'Local wording · The server cannot read its .env file.',
-  api_http_401:'Local wording · Groq rejected the configured key. Check .env, then refresh.',
-  api_http_403:'Local wording · Groq denied access for this key or model.',
-  api_http_400:'Local wording · Groq rejected the model or request settings.',
-  api_http_429:'Local wording · Groq rate limit reached. No automatic retries.',
-  api_network_access_denied:'Local wording · This server cannot connect to Groq because network access is blocked.',
-  api_timeout:'Local wording · Groq timed out. DIP findings remain available.',
-  api_unavailable:'Local wording · The server could not reach Groq.',
-  api_failed_or_unsupported_claim:'Local wording · Groq returned incomplete or unsupported wording; DIP findings are preserved.',
-  finding_limit:'Local wording · This report exceeds the explanation-service finding limit. All DIP findings remain available.'
- }};
- document.getElementById('explanation-source').textContent=data.source==='groq_validated'?'Groq wording validated against DIP finding IDs':(reasons[data.reason]||'Local wording · backend findings preserved');
+ if(data.score_explanation)document.getElementById('score-explanation').textContent=data.score_explanation;
+ document.getElementById('explanation-source').textContent=data.source==='groq_validated'?'Groq wording validated against backend DIP evidence':'Local wording · '+(data.reason||'backend evidence preserved');
 }}).catch(()=>{{}});
 </script>''')
 

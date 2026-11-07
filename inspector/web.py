@@ -346,6 +346,17 @@ class Handler(BaseHTTPRequestHandler):
         source = None
         try:
             fields, files = self.parse_form()
+            if self.path == '/reinspect':
+                identity=str(UUID(fields.get('submission_id','')))
+                if load_inspection(identity,self.server.database):
+                    return self.redirect('/inspection/'+identity)
+                source=load_inspection(str(UUID(fields.get('source_inspection_id',''))),self.server.database)
+                if source is None:raise ValueError('The source inspection was not found.')
+                result=inspect_auto(source['original_png'])
+                result.inspection_id=identity
+                result.segmentation['source_inspection_id']=source['id']
+                save_inspection(result,source['filename'],self.server.database)
+                return self.redirect('/inspection/'+identity)
             if self.path == '/confirm-coverage':
                 identity=str(UUID(fields.get('submission_id','')))
                 if load_inspection(identity,self.server.database):

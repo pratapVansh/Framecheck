@@ -147,7 +147,8 @@ def test_exclusion_preserves_observations_and_recalculates_group(source, scoped_
     saved = record(parent)
     child = amend_inspection(saved, intended_numbers=[1], confirm_coverage=True)
     assert saved['result_json'] == parent.to_json()
-    assert not child.segmentation['products'][1]['intended']
+    assert len(child.segmentation['products'])==1
+    assert not child.segmentation['incidental_regions'][0]['intended']
     old = checks(parent)
     assert all(c.status == old[c.identifier].status and not c.required
                for c in child.checks if c.identifier.startswith('product-2.'))
@@ -258,7 +259,8 @@ def test_provider_contract_covers_new_ids_without_changing_report(source,monkeyp
         approved=json.loads(body['messages'][1]['content'])['approved_items']
         ids={item['finding_id'] for item in approved}
         assert {'photo.group_size','photo.foreground_coverage','product-1.clipping','product-1.mask_completeness'}<=ids
-        return response_for({'items':approved})
+        score_text=json.loads(body['messages'][1]['content'])['approved_score_explanation']
+        return response_for({'items':approved,'score_explanation':score_text})
     monkeypatch.setattr(narration.urllib.request,'urlopen',provider)
     narration._explain.cache_clear()
     try:

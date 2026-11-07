@@ -13,7 +13,7 @@ from uuid import uuid4
 
 from websockets.sync.client import connect
 
-from inspector.auto_inspect import CheckResult, aggregate_required
+from inspector.auto_inspect import CheckResult, aggregate_required, detected_regions, PIPELINE_VERSION
 from inspector.narration import approved_wording, validate
 from scripts.verify_one_click import wait
 from scripts.verify_submission import CDP
@@ -52,7 +52,7 @@ def run():
         return report(identity)
 
     def check(name,result):
-        assert result['pipeline_version']=='1.2.0-photo-scope-dip'
+        assert result['pipeline_version']==PIPELINE_VERSION
         assert result['status']==str(aggregate_required([CheckResult(**c) for c in result['checks']]))
         ids={c['identifier'] for c in result['checks']};assert len(ids)==len(result['checks'])
         rendered=read('/inspection/'+result['inspection_id']).decode()
@@ -81,7 +81,7 @@ def run():
     parents={}
     for name,path,count in cases:
         result=submit('/inspect',{'one_click':'yes'},path);parents[name]=result
-        assert len(result['segmentation']['products'])==count
+        assert len(detected_regions(result['segmentation']))==count
         assert result['status']==('Fail' if name=='dark-loss' else 'Manual Review')
         check(name,result)
     accepted=confirm(parents['single-shoe'],[1]);assert accepted['status']=='Pass';check('single-shoe-confirmed',accepted)
@@ -137,16 +137,16 @@ def run():
                     c.screenshot(target/'single-product-desktop.png')
                     c.navigate(base+'/inspection/'+parents['two-people']['inspection_id'])
                     c.evaluate('document.querySelector("[name=intended_2]").checked=false;document.querySelector("[name=intended_4]").checked=false;document.querySelector("#coverage-question form").requestSubmit(document.querySelector("#coverage-question button[type=submit]"))')
-                    wait(c,'!document.getElementById("coverage-question")')
+                    wait(c,'location.pathname !== '+json.dumps('/inspection/'+parents['two-people']['inspection_id']))
                     identity=c.evaluate('location.pathname.split("/").pop()');browser_tops=report(identity)
                     assert [p['number'] for p in browser_tops['segmentation']['products'] if p['intended']]==[1,3]
-                    assert c.evaluate('document.querySelectorAll(".product-head").length')==4
+                    assert c.evaluate('document.querySelectorAll("[data-intended-product]").length')==2
                     c.screenshot(target/'intended-tops-desktop.png')
                     c.call('Emulation.setDeviceMetricsOverride',{'width':390,'height':844,'deviceScaleFactor':1,'mobile':True})
                     wait(c,'document.documentElement.scrollWidth<=innerWidth+1')
                     c.screenshot(target/'intended-tops-mobile.png')
                     c.navigate(base+'/inspection/'+parents['missed']['inspection_id'])
-                    c.evaluate('document.getElementById("product-outline").closest("details").open=true')
+                    c.evaluate('for(let node=document.getElementById("product-outline");node;node=node.parentElement)if(node.tagName==="DETAILS")node.open=true')
                     c.evaluate('''(()=>{const svg=document.getElementById('product-outline');for(const xy of [[530,210],[729,210],[729,409],[530,409]]){const p=new DOMPoint(...xy).matrixTransform(svg.getScreenCTM());svg.dispatchEvent(new MouseEvent('click',{clientX:p.x,clientY:p.y,bubbles:true}));}document.getElementById('mark-product-form').requestSubmit();})()''')
                     wait(c,'document.querySelectorAll(".product-head").length===2')
                     identity=c.evaluate('location.pathname.split("/").pop()');marked=report(identity)

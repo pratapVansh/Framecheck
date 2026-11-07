@@ -129,8 +129,8 @@ def test_live_http_contract_local_results_and_background_explanation(server,monk
     assert request(server,'POST','/inspect',form,{'Content-Type':kind})[0]==303
     before=load_inspection(identity,server.database)['result_json']
     code,_,body=request(server,'GET',f'/inspection/{identity}')
-    assert code==200 and b'What we found' in body and b'How to fix it' in body
-    assert b'scores, thresholds' in body and b'photo.coverage' in body
+    assert code==200 and b'Intended products' in body and b'What to do next' in body
+    assert b'Details' in body and b'photo.coverage' in body
     code,_,payload=request(server,'GET',f'/explanation/{identity}.json')
     narration=json.loads(payload)
     assert code==200 and narration['source']=='local'
@@ -152,16 +152,17 @@ def test_http_intended_selection_excludes_without_erasing_findings(server,monkey
     assert request(server,'POST','/confirm-coverage',form,{'Content-Type':kind})[0]==303
     child=json.loads(load_inspection(child_id,server.database)['result_json'])
     assert child['segmentation']['products'][0]['intended']
-    assert not child['segmentation']['products'][1]['intended']
+    assert len(child['segmentation']['products'])==1
+    assert not child['segmentation']['incidental_regions'][0]['intended']
     assert all(not c['required'] for c in child['checks'] if c['identifier'].startswith('product-2.'))
     assert len(child['checks'])==len(json.loads(before)['checks'])
     assert load_inspection(identity,server.database)['result_json']==before
     fields.pop('intended_1');fields['submission_id']=str(uuid4())
     form,kind=multipart(fields)
     code,_,body=request(server,'POST','/confirm-coverage',form,{'Content-Type':kind})
-    assert code==400 and b'What we found' in body
+    assert code==400 and b'Intended products' in body
     assert load_inspection(fields['submission_id'],server.database) is None
     form,kind=multipart({'submission_id':str(uuid4()),'source_inspection_id':identity,'polygon':'[]'})
     code,_,body=request(server,'POST','/mark-product',form,{'Content-Type':kind})
-    assert code==400 and b'role="alert"' in body and b'What we found' in body
+    assert code==400 and b'role="alert"' in body and b'Intended products' in body
     assert load_inspection(identity,server.database)['result_json']==before
