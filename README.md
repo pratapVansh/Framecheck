@@ -77,7 +77,15 @@ Open **http://127.0.0.1:8505/**. The application creates its local SQLite databa
 
 Confirmation establishes user intent. It **does not verify mask accuracy** or clear outstanding quality/mask Reviews. Marking and confirmation save new child inspections; earlier reports remain unchanged. Advanced category/profile tools are available at `/?advanced=1`.
 
-## Optional clothing localization
+## First-time setup notes
+
+- Ensure Python 3.12 or newer is installed.
+- Run the commands from the repository root directory.
+- Keep the virtual environment active by using its Python executable for subsequent commands.
+- The application runs locally and can be accessed through your browser.
+- No Groq API key or pretrained model weights are required for the standard inspection workflow.
+  
+### Optional clothing localization
 
 Plain-background foreground inspection works without SegFormer. To enable the existing local clothing parser, install the optional garment dependencies and supply the matching checkpoint weights as described in [models/README.md](models/README.md).
 
