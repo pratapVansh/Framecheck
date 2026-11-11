@@ -1,5 +1,7 @@
 """One-click DIP inspection. Detection coverage and every required check contribute to the verdict."""
 from dataclasses import dataclass, fields
+from collections import OrderedDict
+import copy
 from datetime import datetime, timezone
 import hashlib
 from io import BytesIO
@@ -7,6 +9,7 @@ import json
 import math
 from pathlib import Path
 import time
+import threading
 from uuid import uuid4
 
 import cv2
@@ -20,8 +23,8 @@ from inspector.product_locator import polygon_mask
 from inspector.product_measurements import frame_geometry, measure_scope
 from inspector.regions import analysis_image
 from inspector.segmentation import segment
-from inspector.shirt_locator import MODEL_LOCK, _model
-from inspector.scoring import score_photo
+from inspector.shirt_locator import CHECKPOINT, MODEL_LOCK, _model
+from inspector.scoring import DEFAULT_VERDICT_POLICY, score_photo, score_policy
 
 POLICY = Path(__file__).resolve().parents[1] / 'data/one-click-policy.json'
 FEATURE_VERSION = 'normal-dip-v1'
@@ -33,7 +36,12 @@ GROUP_COMPOSITION = {'name':'Declared product-group framing', 'version':'group-f
     'source':'Existing demo layout rules applied to the intended group, not individual centers.',
     'calibration':'Declared composition constraints; not marketplace or natural-photo accuracy validation.',
     **{key:getattr(_layout,key) for key in ('min_coverage','max_coverage','max_center_offset','min_margin')}}
-PIPELINE_VERSION = '1.4.0-results-intent-dip'
+PIPELINE_VERSION = '1.9.0-provenance-evidence-dip'
+LOCALIZATION_CACHE = OrderedDict()
+LOCALIZATION_LOCK = threading.Lock()
+LOCALIZATION_CACHE_BYTES = 48 * 1024 * 1024
+EVIDENCE_CACHE = OrderedDict()
+EVIDENCE_LOCK = threading.Lock()
 
 
 def detected_regions(meta):
@@ -64,14 +72,18 @@ def aggregate_required(checks):
 
 
 class InspectionResult(LegacyInspectionResult):
+    def score(self):
+        return score_photo([c.to_dict() for c in self.checks],self.segmentation['products'],aggregate_required(self.checks),
+            verdict_policy=self.profile.get('score_verdict',DEFAULT_VERDICT_POLICY))
+
     def to_dict(self):
         payload=super().to_dict()
-        payload['quality_score']=score_photo(payload['checks'],self.segmentation['products'],self.status)
+        payload['quality_score']=self.score()
         return payload
 
     @property
     def status(self):
-        return aggregate_required(self.checks)
+        return self.score()['verdict']
 
     @property
     def quality_status(self):
@@ -95,6 +107,7 @@ def policy():
                 valid[name]=rule
         value['metrics']=valid
         value.setdefault('composition',dict(GROUP_COMPOSITION))
+        value.setdefault('score_verdict',dict(DEFAULT_VERDICT_POLICY))
         return value
     except (OSError, ValueError, KeyError):
         return {'name':'Uncalibrated DIP', 'metrics':{}, 'calibration_kind':'unavailable'}
@@ -117,11 +130,39 @@ def components(mask):
     return [labels==i for i in kept], discarded
 
 
-def detect(rgb):
+def separate_foreground(regions, seg):
+    """Propose raw-gap separation; silhouettes and narrow joins cannot establish item identity."""
+    separated=[];evidence=[]
+    raw=getattr(seg,'raw_mask',seg.mask)
+    for region in regions:
+        parts,_=components(raw&region)
+        substantial=[p for p in parts if p.sum()>=region.sum()*.2]
+        boxes=[cv2.boundingRect(p.astype(np.uint8)) for p in substantial]
+        disjoint=any(all(a[axis]+a[axis+2]<=b[axis] or b[axis]+b[axis+2]<=a[axis]
+                         for i,a in enumerate(boxes) for b in boxes[i+1:]) for axis in (0,1))
+        x,y,w,h=cv2.boundingRect(region.astype(np.uint8))
+        # shortcut: broad solid silhouettes may be one long product or touching items; validate on labelled instances before automatic splitting.
+        broad_solid=w/max(1,h)>=2 and region.sum()/(w*h)>=.95
+        cores,_=components(cv2.erode(region.astype(np.uint8),np.ones((5,5),np.uint8)).astype(bool))
+        neck=len([c for c in cores if c.sum()>=region.sum()*.2])>1
+        split=len(substantial)>1 and disjoint and sum(p.sum() for p in substantial)>=region.sum()*.9
+        if split:
+            separated.extend(substantial)
+        else:separated.append(region)
+        if split or neck or broad_solid:
+            evidence.append({'bbox_analysis':[x,y,w,h],'proposed_parts':len(substantial) if split else 1,
+                'reason':'raw_gap' if split else 'narrow_join' if neck else 'broad_solid_silhouette',
+                'item_count_verified':False})
+    separated.sort(key=lambda m:cv2.boundingRect(m.astype(np.uint8))[:2])
+    return separated,evidence
+
+
+def detect(rgb, *, segmentation=None):
     # shortcut: foreground components are not product instances; replace after independent scene/mask validation.
     small=analysis_image(rgb)
-    seg=segment(small)
+    seg=segmentation if segmentation is not None else segment(small)
     foreground_regions, discarded=components(seg.mask)
+    foreground_regions,separation=separate_foreground(foreground_regions,seg)
     tall=any((lambda b:b[3]/max(1,b[2])>1.45)(cv2.boundingRect(m.astype(np.uint8))) for m in foreground_regions)
     def foreground(complete=True):
         masks=[cv2.resize(m.astype(np.uint8),rgb.shape[1::-1],interpolation=cv2.INTER_NEAREST).astype(bool) for m in foreground_regions]
@@ -129,7 +170,8 @@ def detect(rgb):
         return masks, {'method':'general_foreground','coverage_complete':complete,
             'reason':'All substantial foreground regions on a plain background were inspected.' if complete else 'Small foreground regions remain unresolved.',
             'disclosure':'Foreground-based coverage is estimated. Small, hidden, touching or low-contrast items can be missed.',
-            'region_evidence':'stable foreground on a plain background'}
+            'region_evidence':'stable foreground on a plain background',
+            'item_count_uncertain':bool(separation),'separation_evidence':separation}
     if seg.reliable and foreground_regions and not tall:
         return foreground()
     gray=cv2.cvtColor(small,cv2.COLOR_RGB2GRAY)
@@ -153,9 +195,11 @@ def detect(rgb):
                 person|=candidate
         if person.any():
             near_person=cv2.dilate(person.astype(np.uint8),np.ones((3,3),np.uint8)).astype(bool)
-            masks=[];descriptions=[];explained=body&near_person;skipped=0
+            masks=[];descriptions=[];explained=body&near_person;skipped=0;apparel_separation=[]
             for identity,label in APPAREL_LABELS.items():
                 regions,lost=components((small_labels==identity)&near_person)
+                regions,proposals=separate_foreground(regions,seg)
+                apparel_separation.extend({**proposal,'class_id':identity} for proposal in proposals)
                 skipped+=lost
                 for region in regions:
                     native=cv2.resize(region.astype(np.uint8),rgb.shape[1::-1],interpolation=cv2.INTER_NEAREST).astype(bool)&(labels==identity)
@@ -169,6 +213,9 @@ def detect(rgb):
                         masks.append(cv2.resize(region.astype(np.uint8),rgb.shape[1::-1],interpolation=cv2.INTER_NEAREST).astype(bool))
                         explained|=region;generic_count+=1
                         descriptions.append({'label':'Foreground item','source':'general foreground'})
+            generic_separation=[e for e in separation if not near_person[
+                e['bbox_analysis'][1]:e['bbox_analysis'][1]+e['bbox_analysis'][3],
+                e['bbox_analysis'][0]:e['bbox_analysis'][0]+e['bbox_analysis'][2]].any()]
             residual=seg.mask&~cv2.dilate(explained.astype(np.uint8),np.ones((3,3),np.uint8)).astype(bool)
             unknown=components(residual)[0]
             substantial=max(24,round(residual.size*.002))
@@ -184,7 +231,9 @@ def detect(rgb):
                 'disclosure':'Coverage is estimated from foreground and supported apparel labels. Hidden, touching, small or low-contrast items may be missed or merged.',
                 'region_evidence':'person-associated apparel regions and independently separated foreground items',
                 'region_descriptions':descriptions,'unexplained_pixels':int(residual.sum()),'unexplained_regions':len(unknown),
-                'discarded_apparel_pixels':int(skipped),'foreground_reliable':seg.reliable,'model':info}
+                'discarded_apparel_pixels':int(skipped),'foreground_reliable':seg.reliable,'model':info,
+                'item_count_uncertain':bool(apparel_separation or generic_count and generic_separation),
+                'separation_evidence':apparel_separation+generic_separation}
         if seg.reliable and foreground_regions:
             return foreground()
     except (ImportError,OSError,RuntimeError,ValueError,KeyError,TypeError):
@@ -201,6 +250,32 @@ def detect(rgb):
         'region_evidence':'insufficient foreground or clothing evidence'}
 
 
+def localize(rgb, input_hash):
+    """Reuse only localization, never prior scores; bound native masks and analysis arrays in memory."""
+    signature=[]
+    for name in ('config.json','preprocessor_config.json','model.safetensors'):
+        path=CHECKPOINT/name
+        try:stat=path.stat()
+        except OSError:stat=None
+        signature.append((name,stat.st_size,stat.st_mtime_ns) if stat else (name,None))
+    key=(input_hash,rgb.shape,PIPELINE_VERSION,detect,segment,_model,tuple(signature))
+    with LOCALIZATION_LOCK:
+        if key in LOCALIZATION_CACHE:
+            value,_=LOCALIZATION_CACHE[key];LOCALIZATION_CACHE.move_to_end(key)
+            return (*copy.deepcopy(value),True)
+        seg=segment(analysis_image(rgb))
+        masks,coverage=detect(rgb,segmentation=seg)
+        value=(masks,coverage,seg)
+        size=sum(m.nbytes for m in masks)+seg.mask.nbytes+getattr(seg,'raw_mask',seg.mask).nbytes
+        size+=sum(a.nbytes for a in getattr(seg,'stages',{}).values())
+        # Unresolved/model-unavailable results must be retried rather than cached as permanent failures.
+        if coverage.get('coverage_complete') and size<=LOCALIZATION_CACHE_BYTES:
+            LOCALIZATION_CACHE[key]=(copy.deepcopy(value),size)
+            while len(LOCALIZATION_CACHE)>4 or sum(v[1] for v in LOCALIZATION_CACHE.values())>LOCALIZATION_CACHE_BYTES:
+                LOCALIZATION_CACHE.popitem(last=False)
+        return (*value,False)
+
+
 FIXES={
     'resolution':'Upload a larger original photo; resizing a small image will not restore detail.',
     'contrast':'Use a contrasting background and lighting that reveals the product.',
@@ -210,13 +285,13 @@ FIXES={
     'highlight_loss':'Reduce exposure or soften the light until bright detail returns.',
     'detail':'Move closer or upload an original with more product pixels.',
     'edge':'Leave space around the product and confirm that no part is cut off.',
-    'coverage':'Select the intended items, mark missing or merged products, then confirm the numbering. This does not verify mask accuracy.',
+    'coverage':'Check that every product you want assessed is numbered. Mark missing or touching products, then save your selection. This does not verify outline accuracy.',
     'foreground_coverage':'Inspect the unaccounted areas. Mark intended products; exclude incidental regions in the intended-item controls.',
     'clipping':'Inspect the original product detail. Natural white or black material can resemble clipping; adjust lighting only if detail is lost.',
     'mask_completeness':'Check the full product outline, including flat bright or dark areas. Mark a fuller region and exclude an incomplete candidate.',
-    'group_size':'Move closer or reframe the intended product group to meet the displayed composition policy.',
-    'group_placement':'Place the intended product group nearer the frame center; individual items need not be centered.',
-    'group_margins':'Leave space around the intended product group, including every intended item.'}
+    'group_size':'Move closer or step back so the products fill the photo while keeping their edges visible.',
+    'group_placement':'Move the products together nearer the center of the photo.',
+    'group_margins':'Leave a clear gap between the products and the photo edges.'}
 
 
 def finding(identifier, status, explanation, values=None, thresholds=None, reason=None, *, required=True):
@@ -349,25 +424,49 @@ def select_intended(products, checks, width, height):
     for product in products:
         e=product['intent_evidence'];area=product['visible_pixels']
         e['relative_prominence']=area/largest if largest else 0
+        e['continuation_anchor']=None
+        if e['edge_contact'] and e['relative_prominence']<.65 and e['short_extent_fraction']<=.40 and e['center_offset']>=.20:
+            x,y,w,h=product['bbox'];box=(x/width,y/height,w/width,h/height)
+            for anchor in anchors:
+                if anchor is product or area>anchor['visible_pixels']*.65:continue
+                x,y,w,h=anchor['bbox'];reference=(x/width,y/height,w/width,h/height)
+                for axis in (0,1):
+                    other=1-axis
+                    overlap=min(box[other]+box[other+2],reference[other]+reference[other+2])-max(box[other],reference[other])
+                    if (box[other+2]>reference[other+2] or overlap<box[other+2]*.9 or
+                            box[axis+2]>reference[axis+2]):continue
+                    gaps=[]
+                    if box[axis]<=.005:gaps.append(reference[axis]-box[axis]-box[axis+2])
+                    if box[axis]+box[axis+2]>=.995:gaps.append(box[axis]-reference[axis]-reference[axis+2])
+                    # shortcut: aligned edge continuations suggest context, not identity; use the optional correction until instance labels validate intent.
+                    if any(-.05*min(box[axis+2],reference[axis+2])<=gap<=.025 for gap in gaps):
+                        e['continuation_anchor']=anchor['number']
+                        break
+                if e['continuation_anchor'] is not None:break
         incidental=(anchor_size>0 and e['edge_contact'] and area<=anchor_size*.55
                     and e['relative_prominence']<.6 and e['short_extent_fraction']<=.30
                     and e['center_offset']>=.20)
+        incidental=incidental or e['continuation_anchor'] is not None
         product.update(intended=not incidental,intent_source='automatic',
-            intent_reason='Small peripheral edge fragment beside a more prominent, apparently complete product.' if incidental else
+            intent_reason='Smaller partial edge region aligned with an apparently complete product; estimated incidental context.' if e['continuation_anchor'] is not None else
+                'Small peripheral edge fragment beside a more prominent, apparently complete product.' if incidental else
                 'Retained as an intended candidate; dominant or ambiguous cropped products stay assessable.' if e['edge_contact'] else
                 'Retained as a visible product candidate based on prominence, framing, and apparent completeness.',
             intent_ambiguous=bool((e['edge_contact'] or e['visible_completeness']=='uncertain') and not incidental))
         for identity in product['finding_ids']:by_id[identity].required=not incidental
-    return {'version':'geometry-intent-v1','estimated':True,
+    return {'version':'geometry-intent-v2','estimated':True,
         'rule':'Exclude only peripheral edge fragments with area <=55% of a complete anchor, <60% of the largest region, '
-               'short extent <=30% of frame, and center offset >=20%. Anchors occupy >=3% of frame with offset <=35%.',
+               'short extent <=30% of frame, and center offset >=20%; or aligned edge continuations with area <=65% of '
+               'a complete anchor and <65% of the largest region, short extent <=40%, and offset >=20%. '
+               'Continuations overlap at least 90% across their width, are no larger than the anchor on either axis, '
+               'and attach within a 2.5% frame gap or 5% extent overlap. Anchors occupy >=3% of frame with offset <=35%.',
         'limitation':'Geometry suggests intent, not product identity or mask accuracy. User selection overrides this estimate.'}
 
 
-def coverage_evidence(rgb, masks, coverage):
-    """Keep foreground accounting separate from the user's intended-product assertion."""
+def coverage_evidence(rgb, masks, coverage, products, *, segmentation=None):
+    """Accept supported intended scope while retaining advisory foreground uncertainty."""
     small=analysis_image(rgb)
-    seg=segment(small)
+    seg=segmentation if segmentation is not None else segment(small)
     accounted=seg.mask
     if coverage.get('method')=='general_foreground':
         accounted=np.zeros(seg.mask.shape,bool)
@@ -385,12 +484,39 @@ def coverage_evidence(rgb, masks, coverage):
         _,_,stats,_=cv2.connectedComponentsWithStats(mask.astype(np.uint8),8)
         return int(sum(area>=24 for area in stats[1:,cv2.CC_STAT_AREA]))
     missing=count_regions(lost|weak)
+    # Reuse the detector's substantial-component floor for weak tones; retain raw-region warnings at 24 pixels.
+    # Weak-tone accounting supports plain backgrounds, not person-scene background gradients.
+    substantial=count_regions(lost)
+    if coverage.get('method')=='general_foreground':substantial+=len(components(weak)[0])
+    included=[p for p in products if p.get('intended',True)]
+    reliable=bool(seg.reliable and coverage.get('coverage_complete') and
+        coverage.get('method') in {'general_foreground','clothing_segformer','hybrid_foreground_clothing'})
+    if not included:
+        reason_code='intended_products_missing'
+        reason='No intended product was reliably located. Mark the intended products.'
+    elif not reliable:
+        reason_code='product_detection_unreliable'
+        reason=coverage['reason']+' Detection does not establish complete intended-product coverage.'
+    elif substantial:
+        reason_code='suspected_missing_regions'
+        reason='Substantial unaccounted regions may be missing products. Mark missing products or confirm the intended selection.'
+    elif coverage.get('item_count_uncertain'):
+        reason_code='item_count_unresolved'
+        reason='A connected region may contain touching products or parts of one product. Check the item count; mark separate products if needed.'
+    elif any(p.get('intent_ambiguous',True) for p in included):
+        reason_code='intended_selection_ambiguous'
+        reason='Cropping or an incomplete outline makes the intended selection uncertain. Review the intended products.'
+    else:
+        reason_code=None
+        reason='Reliable detection supports the automatic intended-product selection. Coverage is estimated; mask accuracy remains unverified.'
+    complete=reason_code is None
     value=dict(coverage)
     value.update(foreground_complete=bool(coverage['coverage_complete'] and not missing),
         foreground_reason=coverage['reason'],suspected_missing_regions=missing,
-        discarded_raw_pixels=int(lost.sum()),intended_complete=False,user_confirmed=False,
-        coverage_complete=False,mask_verified=False,
-        reason='Select the intended items and confirm their numbering. Foreground regions can merge products or miss small/low-contrast items.',
+        substantial_missing_regions=substantial,detection_reliable=reliable,
+        discarded_raw_pixels=int(lost.sum()),intended_complete=complete,user_confirmed=False,
+        coverage_complete=complete,mask_verified=False,acceptance_source='automatic' if complete else 'unresolved',
+        reason=reason,reason_code=reason_code,
         disclosure=coverage.get('disclosure','')+' Intended-item confirmation does not verify mask accuracy.')
     return value,seg
 
@@ -405,11 +531,12 @@ def coverage_findings(products, coverage):
         {key:coverage.get(key) for key in ('foreground_complete','suspected_missing_regions','discarded_raw_pixels')},
         reason='suspected_missing_regions' if not foreground else None,required=False),
         finding('photo.coverage','Pass' if complete else 'Manual Review',coverage['reason'],
-            {'detected_regions':len(products),'intended_products':len(included),'incidental_regions':len(products)-len(included),'user_confirmed':complete,
-             'mask_verified':False},reason='intended_coverage_unconfirmed' if not complete else None)]
+            {'detected_regions':len(products),'intended_products':len(included),'incidental_regions':len(products)-len(included),
+             'user_confirmed':coverage.get('user_confirmed',False),'acceptance_source':coverage.get('acceptance_source','unresolved'),
+             'mask_verified':False},reason=coverage.get('reason_code') or ('intended_coverage_unconfirmed' if not complete else None))]
 
 
-def group_findings(products, width, height, p, *, confirmed):
+def group_findings(products, width, height, p, *, accepted):
     included=[item['bbox'] for item in products if item.get('intended',True)]
     geometry={}
     if included:
@@ -431,20 +558,27 @@ def group_findings(products, width, height, p, *, confirmed):
         reason=None
         if not supported:reason='composition_policy_unavailable'
         elif value is None:reason='intended_group_missing'
+        elif not accepted:reason='intended_group_unconfirmed'
         elif name=='group_size' and value<lower:reason='small_in_frame'
-        elif not confirmed:reason='intended_group_unconfirmed'
         elif any(abs(value-bound)<=1/min(width,height) for bound in (lower,upper) if bound is not None):reason='geometry_boundary'
-        # A declared rule can fail only after the user establishes the intended group.
-        state='Manual Review' if reason and (reason!='small_in_frame' or not confirmed) else 'Fail' if bad else 'Pass'
+        # A declared rule can fail only after reliable detection or the user establishes the intended group.
+        state='Manual Review' if reason and (reason!='small_in_frame' or not accepted) else 'Fail' if bad else 'Pass'
         explanations={
             'composition_policy_unavailable':'No supported composition policy is available for this inspection.',
             'intended_group_missing':'No intended product group is available for framing assessment.',
             'small_in_frame':'The intended product group is small in the frame under the declared composition policy.',
-            'intended_group_unconfirmed':'Group framing was measured; select and confirm the intended items before a composition verdict.',
+            'intended_group_unconfirmed':'Group framing was measured; resolve uncertain intended-product coverage before a composition verdict.',
             'geometry_boundary':'Group framing is within one native pixel of the declared rule boundary.'}
         text=explanations.get(reason,f'The intended product group {"does not meet" if bad else "meets"} the declared {name.replace("group_","")} rule. Individual items need not be centered.')
-        checks.append(finding('photo.'+name,state,text,{'score':value,**geometry},
+        dependency={'blocked_by':'photo.coverage'} if reason in {'intended_group_missing','intended_group_unconfirmed'} else {}
+        checks.append(finding('photo.'+name,state,text,{'score':value,**geometry,**dependency},
             {'policy':rule,'minimum':lower,'maximum':upper,'native_coordinates':True},reason))
+    failed=[c for c in checks if c.status==Status.FAIL]
+    severe=len(failed)>=2 or any(c.identifier=='photo.group_size' and
+        c.measurement['score']<rule['min_coverage']/2 for c in failed)
+    for check in checks:
+        check.measurement['severe_framing']=bool(severe and check.status==Status.FAIL)
+        check.threshold['severity_rule']='Two framing rules fail, or group extent is below half the declared minimum.'
     return checks
 
 
@@ -460,6 +594,38 @@ def guard_photo_contrast(checks, rgb, masks, seg):
     return {'foreground_fraction':fraction,'foreground_reliable':seg.reliable}
 
 
+def guard_background_focus(checks, products, coverage, scope):
+    """A blank background is not a focus target; retain the raw full-frame observation."""
+    photo=next(c for c in checks if c.identifier=='photo.blur')
+    original=photo.measurement.pop('whole_photo_observation',None)
+    if original:
+        photo.status=Status(original['status']);photo.reason_code=original['reason_code']
+        photo.explanation=original['explanation'];photo.threshold=original['threshold']
+        photo.measurement.pop('assessment_scope',None);photo.measurement.pop('evidence_finding_ids',None)
+    included=[p for p in products if p.get('intended',True)]
+    local=[c for p in included for c in checks if c.identifier in p['finding_ids'] and c.identifier.endswith('.blur')]
+    contrast=next(c for c in checks if c.identifier=='photo.contrast').measurement.get('score')
+    if (photo.reason_code=='insufficient_signal' and coverage.get('method')=='general_foreground' and
+        coverage.get('intended_complete') and scope['foreground_reliable'] and
+        contrast is not None and contrast<15 and
+        0<scope['foreground_fraction']<=.05 and local and len(local)==len(included) and
+        all(c.status==Status.PASS for c in local)):
+        photo.measurement.update(whole_photo_observation={'status':str(photo.status),'reason_code':photo.reason_code,
+            'explanation':photo.explanation,'threshold':copy.deepcopy(photo.threshold)},
+            assessment_scope='included_products',evidence_finding_ids=[c.identifier for c in local])
+        photo.status=Status.PASS;photo.reason_code=None
+        photo.explanation='Blank background has too little detail for a full-frame focus decision. Every included product passes its own DIP focus check; the original full-frame measurement is retained.'
+        photo.threshold={**photo.threshold,'scope_policy':'blank-background-subject-focus-v1',
+            'calibration':'Declared scope rule using existing product checks; no new full-frame sharpness cutoff.'}
+
+
+def evidence_png(array):
+    """Use lossless, faster PNG compression without changing the frozen legacy encoder."""
+    output=BytesIO()
+    Image.fromarray(array.astype(np.uint8)).save(output,format='PNG',compress_level=3)
+    return output.getvalue()
+
+
 def _draw(rgb, masks, products):
     union=np.zeros(rgb.shape[:2],bool)
     overlay=rgb.copy()
@@ -467,16 +633,40 @@ def _draw(rgb, masks, products):
     for i,mask in enumerate(masks):
         union|=mask
         overlay[mask]=(.7*overlay[mask]+.3*np.array(colors[i%len(colors)])).astype(np.uint8)
-    return png_bytes(union*255),png_bytes(overlay)
+    return evidence_png(union*255),evidence_png(overlay)
+
+
+def encode_evidence(rgb, masks, input_hash):
+    """Reuse immutable PNGs only for identical input pixels, ordered masks, and encoder."""
+    digest=hashlib.sha256()
+    for mask in masks:digest.update(np.ascontiguousarray(mask))
+    key=(input_hash,rgb.shape,len(masks),digest.digest(),evidence_png,_draw)
+    with EVIDENCE_LOCK:
+        cached=EVIDENCE_CACHE.get(key)
+        if cached is not None:
+            EVIDENCE_CACHE.move_to_end(key)
+            return (*cached,True)
+    mask_png,overlay_png=_draw(rgb,masks,[])
+    value=(evidence_png(rgb),mask_png,overlay_png)
+    size=sum(map(len,value))
+    if size<=LOCALIZATION_CACHE_BYTES:
+        with EVIDENCE_LOCK:
+            EVIDENCE_CACHE[key]=value
+            while len(EVIDENCE_CACHE)>4 or sum(sum(map(len,v)) for v in EVIDENCE_CACHE.values())>LOCALIZATION_CACHE_BYTES:
+                EVIDENCE_CACHE.popitem(last=False)
+    return (*value,False)
 
 
 def inspect_auto(data, *, calibration=None):
     started=time.perf_counter()
+    input_hash=hashlib.sha256(data).hexdigest()
     rgb,notes=decode_image(data)
     p=policy() if calibration is None else calibration
+    p={**p,'score_verdict':score_policy(p.get('score_verdict',DEFAULT_VERDICT_POLICY))}
     checks,whole=photo_findings(rgb,p)
-    masks,coverage=detect(rgb)
-    coverage,seg=coverage_evidence(rgb,masks,coverage)
+    localization_started=time.perf_counter()
+    masks,coverage,seg,cache_hit=localize(rgb,input_hash)
+    localization_ms=(time.perf_counter()-localization_started)*1000
     products=[]
     for number,mask in enumerate(masks,1):
         local,item=product_findings(rgb,mask,number,p)
@@ -484,21 +674,37 @@ def inspect_auto(data, *, calibration=None):
         if number<=len(descriptions):item.update(descriptions[number-1])
         products.append(item);checks.extend(local)
     selection=select_intended(products,checks,rgb.shape[1],rgb.shape[0])
+    coverage,seg=coverage_evidence(rgb,masks,coverage,products,segmentation=seg)
     contrast_scope=guard_photo_contrast(checks,rgb,masks,seg)
+    guard_background_focus(checks,products,coverage,contrast_scope)
     checks.extend(coverage_findings(products,coverage))
-    checks.extend(group_findings(products,rgb.shape[1],rgb.shape[0],p,confirmed=False))
-    mask_png,overlay_png=_draw(rgb,masks,products)
+    checks.extend(group_findings(products,rgb.shape[1],rgb.shape[0],p,accepted=coverage['intended_complete']))
+    encoding_started=time.perf_counter()
+    original_png,mask_png,overlay_png,evidence_hit=encode_evidence(rgb,masks,input_hash)
+    encoding_ms=(time.perf_counter()-encoding_started)*1000
     meta={'one_click':True,'coverage':coverage,'whole_photo':whole,
          'intent_selection':selection,
+         'provenance':{'operation':'inspection','measurement_version':PIPELINE_VERSION,
+             'profile_version':p.get('feature_version'),
+             'profile_sha256':hashlib.sha256(json.dumps(p,sort_keys=True,allow_nan=False).encode()).hexdigest(),
+             'correction_version':None,'scoring_version':PIPELINE_VERSION},
          'contrast_scope':contrast_scope,
+         'timings':{'localization_ms':round(localization_ms,2),'localization_cache_hit':cache_hit,
+                    'encoding_ms':round(encoding_ms,2),'evidence_cache_hit':evidence_hit,
+                    'definition':'Processing includes decoding, DIP, localization, scoring and evidence encoding or lookup; excludes database/network time.'},
          'calibration_disclosure':p.get('disclosure','Calibration unavailable; measured evidence is retained.')}
     partition_regions(meta,products)
-    return InspectionResult(str(uuid4()),datetime.now(timezone.utc).isoformat(),hashlib.sha256(data).hexdigest(),
+    result=InspectionResult(str(uuid4()),datetime.now(timezone.utc).isoformat(),input_hash,
         rgb.shape[1],rgb.shape[0],PIPELINE_VERSION,p,PhotoContext.UNCERTAIN,checks,notes,meta,
-        round((time.perf_counter()-started)*1000,2),png_bytes(rgb),mask_png,overlay_png)
+        0,original_png,mask_png,overlay_png)
+    result.score()
+    result.duration_ms=round((time.perf_counter()-started)*1000,2)
+    result.segmentation['timings']['processing_ms']=result.duration_ms
+    return result
 
 
 def amend_inspection(record, *, points=None, confirm_coverage=False, intended_numbers=None):
+    started=time.perf_counter()
     saved=json.loads(record['result_json'])
     if not saved['segmentation'].get('one_click'):raise ValueError('Open a current one-click inspection first.')
     args={f.name:saved[f.name] for f in fields(InspectionResult) if f.name in saved}
@@ -508,6 +714,15 @@ def amend_inspection(record, *, points=None, confirm_coverage=False, intended_nu
     result=InspectionResult(**args)
     result.inspection_id=str(uuid4());result.created_at=datetime.now(timezone.utc).isoformat()
     result.segmentation=json.loads(json.dumps(saved['segmentation']))
+    provenance=result.segmentation.get('provenance',{})
+    measurement_version=provenance.get('measurement_version',
+        None if result.segmentation.get('source_inspection_id') else saved['pipeline_version'])
+    result.segmentation['provenance']={**provenance,'operation':'correction',
+        'measurement_version':measurement_version,
+        'measurement_source_inspection_id':provenance.get('measurement_source_inspection_id',saved['inspection_id']),
+        'profile_version':provenance.get('profile_version',result.profile.get('feature_version')),
+        'profile_sha256':provenance.get('profile_sha256',hashlib.sha256(json.dumps(result.profile,sort_keys=True,allow_nan=False).encode()).hexdigest()),
+        'correction_version':PIPELINE_VERSION,'scoring_version':PIPELINE_VERSION}
     products=detected_regions(result.segmentation)
     if intended_numbers is not None:
         numbers={p.get('region_id',p['number']) for p in products}
@@ -524,11 +739,14 @@ def amend_inspection(record, *, points=None, confirm_coverage=False, intended_nu
         number=max((p.get('region_id',p['number']) for p in products),default=0)+1
         local,item=product_findings(rgb,mask,number,result.profile)
         item['source']='user-marked region; not a verified reference'
+        result.segmentation['provenance'].setdefault('added_region_measurements',[]).append({
+            'region_id':number,'measurement_version':PIPELINE_VERSION,
+            'profile_sha256':result.segmentation['provenance']['profile_sha256']})
         result.checks.extend(local);products.append(item)
         old=np.asarray(Image.open(BytesIO(record['mask_png'])))>0
-        result.mask_png=png_bytes((old|mask)*255)
+        result.mask_png=evidence_png((old|mask)*255)
         overlay=rgb.copy();overlay[old|mask]=(.7*overlay[old|mask]+.3*np.array([25,173,156])).astype(np.uint8)
-        result.overlay_png=png_bytes(overlay)
+        result.overlay_png=evidence_png(overlay)
     included=[p for p in products if p.get('intended',True)]
     if confirm_coverage and not included:raise ValueError('Mark at least one product before confirming coverage.')
     applicability={identity:p.get('intended',True) for p in products for identity in p['finding_ids']}
@@ -539,11 +757,18 @@ def amend_inspection(record, *, points=None, confirm_coverage=False, intended_nu
     coverage.setdefault('foreground_complete',coverage['coverage_complete'])
     coverage.setdefault('foreground_reason',coverage['reason'])
     coverage.update(coverage_complete=complete,intended_complete=complete,user_confirmed=complete,mask_verified=False,
+        acceptance_source='user' if complete else 'unresolved',reason_code=None if complete else 'intended_coverage_unconfirmed',
         reason='User confirms every intended product is numbered. This does not verify mask accuracy.' if complete else
             'A region was added; select the intended items and confirm whether every intended product is numbered.')
+    scope=dict(result.segmentation.get('contrast_scope',{'foreground_fraction':0,'foreground_reliable':False}))
+    if points is not None:scope['foreground_reliable']=False
+    guard_background_focus(result.checks,products,coverage,scope)
     result.segmentation['source_inspection_id']=saved['inspection_id']
     result.checks.append(coverage_findings(products,coverage)[1])
-    result.checks.extend(group_findings(products,result.width,result.height,result.profile,confirmed=complete))
+    result.checks.extend(group_findings(products,result.width,result.height,result.profile,accepted=complete))
     partition_regions(result.segmentation,products)
-    result.pipeline_version=PIPELINE_VERSION
+    result.score()
+    result.duration_ms=round((time.perf_counter()-started)*1000,2)
+    result.segmentation['timings']={'processing_ms':result.duration_ms,'localization_reused':'saved masks; no detection rerun',
+        'definition':'Child processing includes recalculation and any new evidence encoding; excludes database/network time.'}
     return result

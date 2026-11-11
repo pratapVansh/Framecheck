@@ -31,6 +31,15 @@ def response_for(payload,finish='stop',usage=None):
     return Response()
 
 
+def story_response(request, usage=None):
+    evidence=json.loads(json.loads(request.data)['messages'][1]['content'])['story_evidence']
+    story=narration.deterministic_story(evidence)
+    story['summary']=evidence['summary'][-1]
+    for key in ('good','actions'):
+        for claim, option in zip(story[key],evidence[key]):claim['text']=option['texts'][-1]
+    return response_for({'story':story},usage=usage)
+
+
 def test_no_key_never_calls_api_and_retains_all_findings(monkeypatch,report):
     monkeypatch.delenv('GROQ_API_KEY',raising=False)
     monkeypatch.setattr(narration.urllib.request,'urlopen',lambda *a,**k:pytest.fail('No key must not call Groq'))
@@ -48,7 +57,7 @@ def test_valid_response_is_server_side_and_cannot_change_verdict(monkeypatch,rep
         assert body['reasoning_effort']=='low' and 512<=body['max_completion_tokens']<=4096
         assert secret not in request.data.decode() and 'filename' not in request.data.decode()
         assert request.get_header('Authorization')=='Bearer '+secret
-        return response_for({'items':list(reversed(narration.approved_wording(report)))})
+        return story_response(request)
     monkeypatch.setattr(narration.urllib.request,'urlopen',transport)
     result=narration.explain(report)
     assert result['source']=='groq_validated'
@@ -60,13 +69,13 @@ def test_valid_response_is_server_side_and_cannot_change_verdict(monkeypatch,rep
 def test_unsupported_claims_or_invalid_contract_fall_back(monkeypatch,report,bad):
     monkeypatch.setenv('GROQ_API_KEY','test-key')
     items=narration.approved_wording(report)
-    payload={'items':copy.deepcopy(items)}
-    if bad=='unknown_id':payload['items'][0]['finding_id']='invented'
-    if bad=='new_claim':payload['items'][0]['statement']='The camera shook and the listing will be rejected.'
-    if bad=='swapped_claim':payload['items'][0]['statement']=items[1]['statement']
+    payload={'story':narration.deterministic_story(narration.story_options(report))}
+    if bad=='unknown_id':payload['story']['actions'][0]['id']='invented'
+    if bad=='new_claim':payload['story']['actions'][0]['text']='The camera shook and the listing will be rejected.'
+    if bad=='swapped_claim':payload['story']['actions'][0]['text']=payload['story']['actions'][1]['text']
     if bad=='verdict':payload['verdict']='Pass'
-    if bad=='missing':payload['items']=payload['items'][:1]
-    if bad=='duplicate':payload['items'].append(items[0])
+    if bad=='missing':payload['story']['actions']=payload['story']['actions'][:1]
+    if bad=='duplicate':payload['story']['actions'].append(payload['story']['actions'][0])
     monkeypatch.setattr(narration.urllib.request,'urlopen',lambda *a,**k:response_for(payload,'length' if bad=='truncated' else 'stop'))
     output=narration.explain(report)
     assert output['source']=='local' and output['items']==items
@@ -126,7 +135,7 @@ def test_saved_key_activates_without_restart_and_identical_refresh_is_cached(mon
         requests.append(request)
         assert request.get_header('Authorization')=='Bearer saved-test-key'
         body=json.loads(request.data)
-        return response_for({'items':json.loads(body['messages'][1]['content'])['approved_items']})
+        return story_response(request)
     monkeypatch.setattr(narration.urllib.request,'urlopen',transport)
     assert narration.explain(report)['reason']=='not_configured'
     narration.ENV_FILE.write_text('GROQ_API_KEY="saved-test-key"\n',encoding='utf-8')
@@ -144,7 +153,7 @@ def test_key_rotation_invalidates_auth_failure_and_process_setting_takes_precede
         requests.append(request)
         if request.get_header('Authorization')=='Bearer old-test-key':
             raise urllib.error.HTTPError(request.full_url,401,'Rejected',{},None)
-        return response_for({'items':narration.approved_wording(report)})
+        return story_response(request)
     monkeypatch.setattr(narration.urllib.request,'urlopen',transport)
     assert narration.explain(report)['reason']=='api_http_401'
     narration.ENV_FILE.write_text('GROQ_API_KEY=new-test-key\n',encoding='utf-8')
@@ -169,7 +178,7 @@ def test_network_access_failure_has_distinct_sanitized_reason(monkeypatch,report
 def test_provider_usage_contains_only_nonnegative_integer_counts(monkeypatch,report):
     monkeypatch.setenv('GROQ_API_KEY','do-not-echo-key')
     def transport(*args,**kwargs):
-        return response_for({'items':narration.approved_wording(report)},usage={
+        return story_response(args[0],usage={
             'prompt_tokens':42,'completion_tokens':-1,'total_tokens':'do-not-echo-key','other':'ignored'})
     monkeypatch.setattr(narration.urllib.request,'urlopen',transport)
     result=narration.explain(report)

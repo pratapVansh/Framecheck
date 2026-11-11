@@ -6,7 +6,7 @@ Framecheck is a local Python application for reviewing product photographs. It c
 
 The project demonstrates explainable **Digital Image Processing (DIP)**: colour-based segmentation, morphology, filtering, sharpness, contrast, noise, exposure statistics, and framing measurements. A pretrained SegFormer can help locate worn garments. Optional Groq wording explains existing findings; **DIP owns every finding and the verdict**.
 
-> This is a course prototype with provisional thresholds. Pass means the applicable implemented rules passed; it is not a marketplace approval or a guarantee of inspection accuracy.
+> This is a course prototype with provisional thresholds. Pass means the score meets the configured threshold, required evidence is complete, and no critical defect is confirmed. It is not a marketplace approval or a guarantee of inspection accuracy.
 
 ## What it checks
 
@@ -15,9 +15,11 @@ The project demonstrates explainable **Digital Image Processing (DIP)**: colour-
 | Whole photo | Native resolution, sharpness, contrast, noise, and severe dark/highlight detail loss |
 | Each numbered product | Pixel support, sharpness, noise, tonal support, clipping warnings, possible incomplete masks, and frame-edge contact |
 | Intended product group | Overall size, placement, and margins in original frame coordinates |
-| Coverage | Advisory foreground accounting, separate from required intended-item confirmation |
+| Coverage | Automatic intended-product acceptance when detection is reliable; review when evidence is unresolved |
 
 The app preserves original dimensions and uses an analysis image with a maximum long side of 512 px. Product exposure statistics use the selected mask. Mostly blank backgrounds receive a contrast guard rather than an automatic contrast rejection. Individual products do not each have to be centred.
+
+Version 1.7 proposes separation at raw foreground gaps and flags unresolved touching-item counts. Those proposals are not verified product identities. On mostly blank reliable backgrounds, focus can use independently passing product checks while preserving the original full-frame observation. Uncertain product focus and existing calibration guards remain Review. Severe framing blocks Pass even when the score exceeds 75.
 
 ## Workflow
 
@@ -31,8 +33,8 @@ flowchart TD
     E --> G[Number regions and run per-product DIP checks]
     F --> G
     G --> H[Show findings; mark missing items or exclude incidental ones]
-    H --> I[Confirm intended items and assess group framing]
-    C --> J[DIP aggregation: Fail, Manual Review, or Pass]
+    H --> I[Accept reliable intended scope and assess group framing]
+    C --> J[DIP score policy: Pass, Needs Improvement, or Needs Review]
     G --> J
     I --> J
     J --> K[Save inspection and DIP evidence]
@@ -42,7 +44,9 @@ flowchart TD
     M --> N[Update explanation text only]
 ```
 
-A required **Fail** takes precedence. Otherwise, unresolved required evidence produces **Manual Review**. **Pass** requires all applicable required checks to pass. Excluded items retain their observations but do not decide the verdict. Advisory foreground warnings can remain visible after confirmation.
+The default policy passes scores of **75/100 or higher** only when required evidence is complete and no critical defect is confirmed. A confirmed critical defect or a complete score below the threshold gives **Needs Improvement**. Incomplete required checks give **Needs Review**; a confirmed critical defect takes precedence. Points pending incomplete checks stay separate from points lost for confirmed problems. Excluded items and advisory findings retain their observations without deciding the verdict. Passing photos still receive practical suggestions.
+
+Configure the provisional threshold in `data/one-click-policy.json` under `score_verdict.pass_threshold` (a finite number from 0 to 100). Invalid settings produce Needs Review. Each new inspection saves its effective policy; existing reports keep their saved verdicts. See [score policy and critical checks](docs/quality-score.md).
 
 ## Run locally
 
@@ -72,10 +76,14 @@ Open **http://127.0.0.1:8505/**. The application creates its local SQLite databa
 2. Read the completed whole-photo and numbered-product findings.
 3. Uncheck incidental items, such as trousers in a tops-only listing.
 4. Mark missing products. If a candidate merges several items, mark them separately and exclude the merged candidate.
-5. Confirm that every intended product is numbered. New inspections remain Review until this step; a supported single-product result can then Pass.
+5. Reliable detections accept intended-product coverage and evaluate group framing automatically. Confirm or correct the selection only when evidence is unresolved or your intended products differ.
 6. Open **Details** for masks, scores, thresholds, calibration notes, or the downloadable JSON report.
 
+A suggestion beside the verdict opens the relevant evidence, original-size photo, or item-selection controls. On phones this action appears before the photo and product cards. Mark separate products and exclude a combined candidate when a region contains several items.
+
 Confirmation establishes user intent. It **does not verify mask accuracy** or clear outstanding quality/mask Reviews. Marking and confirmation save new child inspections; earlier reports remain unchanged. Advanced category/profile tools are available at `/?advanced=1`.
+
+Localization is reused within a bounded in-memory cache; every new inspection recomputes DIP findings and its score. Details timing includes evidence encoding. Upload/correction `Server-Timing` headers also measure committed storage and application request time. No cache or new verdict is applied retrospectively to saved reports. See [scope, severity, timing, and remaining validation limits](docs/quality-score.md).
 
 ## Optional clothing localization
 
@@ -94,7 +102,7 @@ GROQ_MODEL=openai/gpt-oss-20b
 
 Enter your own key only in the ignored `.env` file. The server reads settings when explanations are requested. Nonempty process environment settings take precedence.
 
-Groq receives approved finding IDs, statements, and fixes?not the photo or filename. Responses must match every approved item exactly. Missing configuration, invalid claims, timeouts, and network/provider errors retain local wording and the saved DIP verdict. The app works without Groq.
+Groq receives approved finding IDs, statements, and fixes?not the photo or filename. Friendly summaries use evidence-approved phrase alternatives and exact finding references; unsupported claims are rejected. Missing configuration, invalid claims, timeouts, and network/provider errors retain local wording and the saved DIP verdict. The app works without Groq.
 
 ## Tests
 

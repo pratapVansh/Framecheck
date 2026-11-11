@@ -34,7 +34,7 @@ def test_fixed_budget_and_missing_disabled_or_review_never_earn_credit():
         score=score_photo(changed,products,'Pass')
         assert score['score']==score['assessed_coverage_percent']==86
         assert score['uncertainty_withheld']==14 and score['possible_range']==[86,100]
-        assert score['verdict']=='Manual Review'
+        assert score['verdict']=='Needs Review'
     assert score_photo([],[],'Pass')['score']==0
     missing=score_photo(perfect_checks(),[],'Manual Review')
     assert missing['uncertainty_withheld']==30
@@ -50,10 +50,76 @@ def test_worst_intended_product_and_independent_photo_failures():
     assert score['assessed_coverage_percent']==100 and score['possible_range']==[82,82]
     products[1]['intended']=False
     score=score_photo(checks,products,'Fail')
-    assert score['score']==90 and score['confirmed_deductions']==10 and score['verdict']=='Fail'
+    assert score['score']==90 and score['confirmed_deductions']==10 and score['verdict']=='Needs Improvement'
     products.extend({'number':n} for n in range(3,6))
     # Missing additional regions cannot improve any component.
     assert score_photo(checks,products,'Fail')['score']<=90
+
+
+@pytest.mark.parametrize('problem,incomplete', [(False,False),(True,False),(False,True),(True,True)])
+def test_plain_score_summary_separates_problems_from_incomplete_checks(problem,incomplete):
+    checks=perfect_checks()
+    if problem:next(c for c in checks if c['identifier']=='photo.noise')['status']='Fail'
+    if incomplete:next(c for c in checks if c['identifier']=='photo.blur')['status']='Manual Review'
+    score=score_photo(checks,[{'number':1}],'Fail' if problem else 'Manual Review' if incomplete else 'Pass')
+    original=copy.deepcopy(score)
+    text=score_statement(score)
+    assert score==original
+    assert 'weighted' not in text and 'unassessed' not in text
+    if problem:
+        assert '10 points were lost for problems with photo graininess' in text
+        assert 'Follow the fixes below' in text
+    else:assert 'No points were lost' in text
+    if incomplete:
+        assert '14 points are pending' in text and 'photo focus' in text
+        assert 'Incomplete checks do not confirm a problem' in text
+        assert 'Details' in text
+    elif not problem:assert 'All checks included in this score passed' in text
+
+
+def test_problem_in_one_product_does_not_hide_incomplete_checks_on_another():
+    checks=perfect_checks((1,2))
+    next(c for c in checks if c['identifier']=='product-1.blur')['status']='Fail'
+    next(c for c in checks if c['identifier']=='product-2.blur')['status']='Manual Review'
+    score=score_photo(checks,[{'number':1},{'number':2}],'Fail')
+    assert score['confirmed_deductions']==8 and score['uncertainty_withheld']==0
+    text=score_statement(score)
+    assert '8 points were lost for problems with product focus' in text
+    assert 'Some checks for product focus are still incomplete' in text
+    assert 'review incomplete checks under Details' in text
+
+
+@pytest.mark.parametrize('component,label', [
+    ('photo.coverage','whether all products are marked'),
+    ('photo.group_size','how much of the photo the products fill'),
+    ('photo.group_placement','where the products sit in the photo'),
+    ('photo.group_margins','space around the products'),
+])
+def test_uncertain_selection_and_framing_use_plain_labels(component,label):
+    checks=perfect_checks()
+    next(c for c in checks if c['identifier']==component)['status']='Manual Review'
+    text=score_statement(score_photo(checks,[{'number':1}],'Manual Review'))
+    assert label in text
+    assert all(term not in text.lower() for term in ['intended-product coverage','group size','weighted'])
+
+
+def test_score_overview_uses_real_completed_checks_and_keeps_technical_details(normal_image,unit_policy):
+    result=inspect_auto(png_bytes(normal_image),calibration=unit_policy).to_dict()
+    next(c for c in result['checks'] if c['identifier']=='photo.blur')['status']='Manual Review'
+    result['status']='Manual Review'
+    result['quality_score']=score_photo(result['checks'],result['segmentation']['products'],result['status'])
+    original=json.dumps(result)
+    rendered=modern_ui.render_result({'result_json':original,'filename':'fixture.png'})
+    overview,details=rendered.split('<details class="review-details"',1)
+    required=[c for c in result['checks'] if c.get('required',True)]
+    completed=sum(c['status'] in {'Pass','Fail'} for c in required)
+    assert 'Needs Review' in overview and 'Checks completed' not in overview
+    assert 'Checks completed' in details
+    assert f'{completed} of {len(required)}' in details
+    assert all(term not in overview for term in ['weighted checks','Assessed coverage','Intended-product coverage','Group size'])
+    assert 'DIP verdict: Needs Review' in details and '% of weighted checks' in details
+    assert 'Intended-product coverage' in details and 'Group size' in details
+    assert result==json.loads(original)
 
 
 def scene(monkeypatch, rects, labels=None):
@@ -62,7 +128,7 @@ def scene(monkeypatch, rects, labels=None):
     for x,y,w,h in rects:
         mask=np.zeros(rgb.shape[:2],bool);mask[y:y+h,x:x+w]=True;masks.append(mask)
         rgb[mask]=np.repeat(texture[:,:,None],3,axis=2)[mask]
-    monkeypatch.setattr(auto_inspect,'detect',lambda image:(masks,{
+    monkeypatch.setattr(auto_inspect,'detect',lambda image, **kwargs:(masks,{
         'method':'test-fixture','coverage_complete':True,'reason':'Procedural regions.',
         'disclosure':'Not a real detector accuracy test.',
         'region_descriptions':[{'label':label} for label in labels or ['Generic']*len(masks)]}))
@@ -87,7 +153,7 @@ def test_two_complete_products_keep_edge_fragments_as_context_and_allow_override
     assert edge['withheld']==5
     rendered=modern_ui.render_result({**saved,'filename':'fixture.png'})
     assert '2 intended products' in rendered and 'Incidental context' in rendered
-    assert 'Whole-photo quality' in rendered and 'Assessed coverage' in rendered
+    assert 'Your photo review' in rendered and 'Checks completed' in rendered
     assert 'data-product-number="2"' in rendered and 'Override intended products' in rendered
     assert [p['region_id'] for p in products]==[1,3]
     assert [p['region_id'] for p in parent.segmentation['incidental_regions']]==[2,4]
@@ -118,11 +184,22 @@ def test_score_roundtrips_storage_and_old_reports_render_without_rewriting(tmp_p
     old_json=json.dumps(old)
     assert 'Not scored' in modern_ui.render_result({**saved,'result_json':old_json})
     assert json.loads(old_json)==old
+    prior=json.loads(saved['result_json'])
+    prior['pipeline_version']='1.4.0-results-intent-dip'
+    prior_json=json.dumps(prior)
+    assert 'Reinspect this photo' in modern_ui.render_result({**saved,'result_json':prior_json})
+    assert json.loads(prior_json)==prior
 
 
 @pytest.mark.parametrize('bad',[False,True])
-def test_groq_receives_score_evidence_and_cannot_change_score(monkeypatch,tmp_path,normal_image,unit_policy,bad):
-    report=inspect_auto(png_bytes(normal_image),calibration=unit_policy).to_dict()
+@pytest.mark.parametrize('case',['clear','passing_improvements','critical','incomplete'])
+def test_groq_receives_score_evidence_and_cannot_change_score(monkeypatch,tmp_path,normal_image,unit_policy,bad,case):
+    result=inspect_auto(png_bytes(normal_image),calibration=unit_policy)
+    if case!='clear':
+        identifier={'passing_improvements':'photo.contrast','critical':'photo.noise','incomplete':'photo.blur'}[case]
+        next(c for c in result.checks if c.identifier==identifier).status='Manual Review' if case=='incomplete' else 'Fail'
+    report=result.to_dict()
+    assert report['status']=={'clear':'Pass','passing_improvements':'Pass','critical':'Needs Improvement','incomplete':'Needs Review'}[case]
     before=copy.deepcopy(report)
     monkeypatch.setattr(narration,'ENV_FILE',tmp_path/'absent')
     monkeypatch.setenv('GROQ_API_KEY','fixture-key')
@@ -130,7 +207,9 @@ def test_groq_receives_score_evidence_and_cannot_change_score(monkeypatch,tmp_pa
         data=json.loads(json.loads(request.data)['messages'][1]['content'])
         assert data['score_evidence']==report['quality_score']
         text=data['approved_score_explanation']
-        return response_for({'items':data['approved_items'],'score_explanation':'Score: 100/100, verified.' if bad else text})
+        story=narration.deterministic_story(data['story_evidence'])
+        if bad:story['headline']='Score: 100/100, verified.'
+        return response_for({'story':story})
     monkeypatch.setattr(narration.urllib.request,'urlopen',provider)
     narration._explain.cache_clear()
     try:
@@ -149,7 +228,9 @@ def test_http_report_includes_score_and_override_creates_immutable_child(server,
     assert request(server,'POST','/inspect',body,{'Content-Type':kind})[0]==303
     raw=request(server,'GET',f'/report/{identity}.json')[2]
     parent=json.loads(raw)
-    assert parent['quality_score']['uncertainty_withheld']>=10
+    assert parent['quality_score']['uncertainty_withheld']==0
+    assert parent['status']=='Pass'
+    assert not parent['segmentation']['coverage']['user_confirmed']
     child_id=str(uuid4())
     body,kind=multipart({'source_inspection_id':identity,'submission_id':child_id,
                          'intent_selection':'yes','intended_1':'yes','coverage_confirm':'yes'})

@@ -40,14 +40,19 @@ def record(result):
 
 def test_clear_can_pass_and_missing_coverage_blocks_only_required_check(monkeypatch,normal_image,unit_policy):
     report=inspect_auto(png_bytes(normal_image),calibration=unit_policy)
-    assert len(report.segmentation['products'])==1 and report.status=='Manual Review'
+    assert len(report.segmentation['products'])==1 and report.status=='Pass'
+    assert report.segmentation['coverage']['acceptance_source']=='automatic'
+    assert not report.segmentation['coverage']['user_confirmed']
+    coverage=next(c for c in report.checks if c.identifier=='photo.coverage')
+    assert coverage.measurement['user_confirmed'] is False
+    assert all(c.status=='Pass' for c in report.checks if c.required)
     confirmed=amend_inspection(record(report),confirm_coverage=True)
     assert confirmed.status=='Pass'
     assert all(c.status=='Pass' for c in confirmed.checks if c.required)
     region=np.zeros(normal_image.shape[:2],bool);region[210:430,280:580]=True
-    monkeypatch.setattr(auto_inspect,'detect',lambda rgb:([region],{'method':'test','coverage_complete':False,'reason':'A second item may be missing.','disclosure':'Test only'}))
+    monkeypatch.setattr(auto_inspect,'detect',lambda rgb, **kwargs:([region],{'method':'test','coverage_complete':False,'reason':'A second item may be missing.','disclosure':'Test only'}))
     uncertain=inspect_auto(png_bytes(normal_image),calibration=unit_policy)
-    assert uncertain.status=='Manual Review'
+    assert uncertain.status=='Needs Review'
     assert next(c for c in uncertain.checks if c.identifier=='photo.coverage').status=='Manual Review'
     assert all(c.status=='Pass' for c in uncertain.checks if c.identifier.startswith('product-'))
     assert amend_inspection(record(uncertain),confirm_coverage=True).status=='Pass'
@@ -65,7 +70,8 @@ def test_multiple_products_automatically_receive_all_local_checks(normal_image,u
     assert {c.identifier for c in result.checks if c.identifier.startswith('product-2.')}=={
         'product-2.detail','product-2.blur','product-2.noise','product-2.edge',
         'product-2.contrast','product-2.clipping','product-2.mask_completeness'}
-    assert result.status=='Manual Review'
+    assert result.status=='Pass'
+    assert result.segmentation['coverage']['acceptance_source']=='automatic'
     assert amend_inspection(record(result),confirm_coverage=True).status=='Pass'
 
 
@@ -73,7 +79,7 @@ def test_confirmed_signal_loss_fails_even_when_detection_missing(normal_image,un
     damaged=(normal_image.astype(float)*.01).astype(np.uint8)
     report=inspect_auto(png_bytes(damaged),calibration=unit_policy)
     by_id={c.identifier:c for c in report.checks}
-    assert report.status=='Fail'
+    assert report.status=='Needs Improvement'
     assert by_id['photo.resolution'].status=='Pass'
     assert by_id['photo.shadow_loss'].status=='Fail'
     assert by_id['photo.coverage'].status=='Manual Review'
@@ -89,10 +95,10 @@ def test_missing_noise_affects_only_noise_and_noise_dependent_sharpness(monkeypa
     assert checks['photo.noise'].status=='Manual Review'
     assert checks['photo.blur'].status=='Manual Review'
     assert checks['photo.contrast'].status==checks['photo.resolution'].status=='Pass'
-    assert checks['photo.coverage'].status=='Manual Review'
+    assert checks['photo.coverage'].status=='Pass'
     child=amend_inspection(record(report),confirm_coverage=True)
     assert next(c for c in child.checks if c.identifier=='photo.coverage').status=='Pass'
-    assert child.status=='Manual Review'
+    assert child.status=='Needs Review'
 
 
 def test_unvalidated_fail_range_does_not_disable_pass_or_other_checks():
@@ -104,7 +110,7 @@ def test_unvalidated_fail_range_does_not_disable_pass_or_other_checks():
 
 def test_confirmation_and_marks_preserve_parent_and_available_findings(monkeypatch,normal_image,unit_policy):
     region=np.zeros(normal_image.shape[:2],bool);region[210:430,280:580]=True
-    monkeypatch.setattr(auto_inspect,'detect',lambda rgb:([region],{'method':'test','coverage_complete':False,'reason':'Check coverage','disclosure':'Test'}))
+    monkeypatch.setattr(auto_inspect,'detect',lambda rgb, **kwargs:([region],{'method':'test','coverage_complete':False,'reason':'Check coverage','disclosure':'Test'}))
     parent=inspect_auto(png_bytes(normal_image),calibration=unit_policy)
     source=record(parent);saved=source['result_json']
     child=amend_inspection(source,confirm_coverage=True)
@@ -131,6 +137,8 @@ def test_live_http_contract_local_results_and_background_explanation(server,monk
     code,_,body=request(server,'GET',f'/inspection/{identity}')
     assert code==200 and b'Intended products' in body and b'What to do next' in body
     assert b'Details' in body and b'photo.coverage' in body
+    assert b'Confirm the intended products</h3>' not in body
+    assert json.loads(before)['status']=='Pass'
     code,_,payload=request(server,'GET',f'/explanation/{identity}.json')
     narration=json.loads(payload)
     assert code==200 and narration['source']=='local'

@@ -67,17 +67,20 @@ def test_exposure_percentiles_use_only_the_selected_mask():
 
 
 @pytest.mark.parametrize('case,count', [('separated', 2), ('merged', 1), ('missed', 1)])
-def test_foreground_accounting_is_not_intended_product_confirmation(case, count):
+def test_reliable_foreground_accepts_estimated_intent_unless_substantial_evidence_is_missing(case, count):
     result = inspect_auto(audit_image(case))
     assert len(result.segmentation['products']) == count
     by_id = checks(result)
-    assert by_id['photo.coverage'].status == Status.REVIEW
-    assert not result.segmentation['coverage']['intended_complete']
+    complete=case=='separated'
+    assert by_id['photo.coverage'].status == (Status.PASS if complete else Status.REVIEW)
+    assert result.segmentation['coverage']['intended_complete'] is complete
+    assert not result.segmentation['coverage']['user_confirmed']
     assert 'photo.foreground_coverage' in by_id
     assert all(p['finding_ids'] for p in result.segmentation['products'])
     if case == 'missed':
         assert by_id['photo.foreground_coverage'].status == Status.REVIEW
         assert result.segmentation['coverage']['suspected_missing_regions'] > 0
+        assert by_id['photo.coverage'].reason_code=='suspected_missing_regions'
 
 
 def test_incomplete_mask_stays_review_after_intended_items_confirmed(monkeypatch):
@@ -85,7 +88,7 @@ def test_incomplete_mask_stays_review_after_intended_items_confirmed(monkeypatch
     masks=[]
     for left,right in [(160,410),(665,740)]:
         mask=np.zeros((640,900),bool);mask[200:420,left:right]=True;masks.append(mask)
-    monkeypatch.setattr(auto_inspect,'detect',lambda image:(masks,{
+    monkeypatch.setattr(auto_inspect,'detect',lambda image, **kwargs:(masks,{
         'method':'test-fixture','coverage_complete':True,'reason':'Fixed accepted regions','disclosure':'Procedural fixture'}))
     result = inspect_auto(audit_image('clipped'))
     assert checks(result)['product-2.mask_completeness'].status == Status.REVIEW
@@ -93,7 +96,7 @@ def test_incomplete_mask_stays_review_after_intended_items_confirmed(monkeypatch
     assert checks(child)['photo.coverage'].status == Status.PASS
     assert checks(child)['product-2.mask_completeness'].status == Status.REVIEW
     assert not child.segmentation['products'][1]['mask_verified']
-    assert child.status == Status.REVIEW
+    assert child.status == 'Needs Review'
 
 
 @pytest.mark.parametrize('luminance', [0, 255])
@@ -126,17 +129,18 @@ def test_blank_background_does_not_fail_contrast_and_small_group_is_reported():
     by_id = checks(result)
     assert by_id['photo.contrast'].status == Status.REVIEW
     assert by_id['photo.contrast'].reason_code == 'background_dominated_contrast'
-    assert by_id['photo.group_size'].reason_code == 'small_in_frame'
+    assert by_id['photo.group_size'].status == Status.FAIL
+    assert 'small in the frame' in by_id['photo.group_size'].explanation
     assert by_id['photo.noise'].status == Status.PASS
     assert by_id['photo.highlight_loss'].status == Status.PASS
-    assert result.status == Status.REVIEW
+    assert result.status == 'Needs Improvement'
 
 
 def test_group_placement_and_margins_use_native_coordinates():
     result = inspect_auto(audit_image('corner'))
     by_id = checks(result)
     assert by_id['photo.group_margins'].measurement['margins'][0] == pytest.approx(8 / 900)
-    assert by_id['photo.group_placement'].status == Status.REVIEW
+    assert by_id['photo.group_placement'].status == Status.FAIL
     child = amend_inspection(record(result), confirm_coverage=True)
     assert checks(child)['photo.group_placement'].status == Status.FAIL
     assert checks(child)['photo.group_margins'].status == Status.FAIL
@@ -168,13 +172,15 @@ def test_missing_composition_policy_requests_review(source, scoped_policy):
     assert checks(child)['photo.group_size'].reason_code == 'composition_policy_unavailable'
 
 
-def test_real_single_product_can_pass_after_intent_confirmation():
+def test_real_single_product_can_pass_without_intent_confirmation():
     source = ROOT / 'reports/multi-product-debug/browser-verified/shoe/original.png'
     if not source.is_file():
         pytest.skip('Optional local user-photo regression; private photos are not distributed.')
     raw = source.read_bytes()
     parent = inspect_auto(raw)
-    assert parent.status == Status.REVIEW
+    assert parent.status == Status.PASS
+    assert parent.segmentation['coverage']['acceptance_source']=='automatic'
+    assert not parent.segmentation['coverage']['user_confirmed']
     child = amend_inspection(record(parent), confirm_coverage=True)
     assert child.status == Status.PASS
     assert len(child.segmentation['products']) == 1
@@ -187,7 +193,7 @@ def test_single_product_flow_without_private_photos_or_model():
     parent=inspect_auto(png_bytes(rgb))
     assert len(parent.segmentation['products'])==1
     assert parent.segmentation['coverage']['method']=='general_foreground'
-    assert parent.status==Status.REVIEW
+    assert parent.status==Status.PASS
     child=amend_inspection(record(parent),confirm_coverage=True)
     assert child.status==Status.PASS
     assert not child.segmentation['products'][0]['mask_verified']
@@ -204,12 +210,12 @@ def test_noise_and_exposure_failures_survive_missing_or_excluded_products(source
     union = np.logical_or(*masks)
     rng = np.random.default_rng(74)
     rgb[~union] = np.clip(rgb[~union].astype(float) + rng.normal(0, 35, rgb[~union].shape), 0, 255)
-    monkeypatch.setattr(auto_inspect, 'detect', lambda image: (masks, {
+    monkeypatch.setattr(auto_inspect, 'detect', lambda image, **kwargs: (masks, {
         'method': 'test', 'coverage_complete': True, 'reason': 'Fixed original masks', 'disclosure': 'Fixture'}))
     parent = inspect_auto(png_bytes(rgb))
     assert checks(parent)['photo.noise'].status == Status.FAIL
     child = amend_inspection(record(parent), intended_numbers=[1], confirm_coverage=True)
-    assert child.status == Status.FAIL
+    assert child.status == 'Needs Improvement'
     assert checks(child)['photo.noise'].to_dict() == checks(parent)['photo.noise'].to_dict()
     assert aggregate([CheckResult('advisory', 'quality', Status.FAIL, {}, {}, '', required=False)]) == Status.REVIEW
 
@@ -232,10 +238,39 @@ def test_all_findings_render_and_groq_cannot_override_new_evidence(source):
 
 def test_group_can_pass_with_two_individually_off_center_products(source):
     parent=inspect_auto(source)
+    assert parent.status==Status.PASS
+    assert all(c.status==Status.PASS for c in parent.checks if c.identifier.startswith('photo.group_'))
     child=amend_inspection(record(parent),confirm_coverage=True)
     assert child.status==Status.PASS
     assert all(c.status==Status.PASS for c in child.checks if c.identifier.startswith('photo.group_'))
     assert all(abs((p['bbox'][0]+p['bbox'][2]/2)/child.width-.5)>.1 for p in child.segmentation['products'])
+
+
+@pytest.mark.parametrize('uncertainty,reason', [
+    ('detection','product_detection_unreliable'),
+    ('intent','intended_selection_ambiguous'),
+    ('missing','intended_products_missing'),
+])
+def test_coverage_keeps_specific_review_reasons(source, monkeypatch, uncertainty, reason):
+    original_detect=auto_inspect.detect
+    original_select=auto_inspect.select_intended
+    if uncertainty in {'detection','missing'}:
+        def detect(rgb, **kwargs):
+            masks,coverage=original_detect(rgb, **kwargs)
+            coverage['coverage_complete']=False
+            return ([] if uncertainty=='missing' else masks),coverage
+        monkeypatch.setattr(auto_inspect,'detect',detect)
+    else:
+        def select(*args):
+            selection=original_select(*args)
+            args[0][0]['intent_ambiguous']=True
+            return selection
+        monkeypatch.setattr(auto_inspect,'select_intended',select)
+    result=inspect_auto(source)
+    assert checks(result)['photo.coverage'].status==Status.REVIEW
+    assert checks(result)['photo.coverage'].reason_code==reason
+    assert all(c.status==Status.REVIEW for c in result.checks if c.identifier.startswith('photo.group_'))
+    assert not result.segmentation['coverage']['user_confirmed']
 
 
 def test_raw_small_components_are_disclosed_before_cleanup_can_hide_them(source):

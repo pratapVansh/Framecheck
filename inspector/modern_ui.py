@@ -3,11 +3,15 @@ import html
 import json
 from uuid import uuid4
 
-from inspector.auto_inspect import CheckResult, aggregate_required as aggregate, detected_regions
+from inspector.auto_inspect import CheckResult, PIPELINE_VERSION, aggregate_required as aggregate, detected_regions
 from inspector.narration import approved_wording
+from inspector.story import story_options, deterministic_story, friendly_finding
 from inspector.product_forms import marking_form
-from inspector.scoring import LABELS, score_statement
+from inspector.scoring import LABELS, WEIGHTS, score_statement
 
+PRODUCT_LABELS={'detail':'Product detail','blur':'Focus','noise':'Graininess',
+                'contrast':'Visible detail','clipping':'Bright and dark detail',
+                'mask_completeness':'Product outline','edge':'Photo edges'}
 
 def esc(value):return html.escape(str(value),quote=True)
 
@@ -22,7 +26,10 @@ def page(title,body):
 
 
 def badge(status,extra=''):
-    return f'<span class="pill {esc(status.lower().replace(" ","-"))} {extra}">{esc(status)}</span>'
+    label='Needs a quick check' if status=='Manual Review' and extra=='verdict' else status
+    if extra=='product':label={'Pass':'Looks good','Fail':'Needs an update','Manual Review':'Needs a closer look','Disabled':'Not checked'}.get(status,status)
+    color={'Needs Improvement':'fail','Needs Review':'manual-review'}.get(status,status.lower().replace(' ','-'))
+    return f'<span class="pill {esc(color)} {extra}">{esc(label)}</span>'
 
 
 def home(error=None):
@@ -53,6 +60,12 @@ def numbered_photo(result,identity):
     return f'<svg viewBox="0 0 {w} {h}" role="img" aria-label="Original photo with intended products numbered"><image href="/evidence/{identity}/original.png" width="{w}" height="{h}"/>{"".join(marks)}</svg>'
 
 
+CSS += '''
+.review-overview{grid-template-areas:"photo score"}.review-photo{grid-area:photo}.score-panel{grid-area:score;min-width:0}.primary-suggestion{width:100%;padding:16px;background:#edf3eb;border:1px solid #d8e3d6;border-radius:12px;box-sizing:border-box}.primary-suggestion h3{font-size:16px}.primary-suggestion p{font-size:13px;margin:8px 0 12px}.primary-suggestion .button{font-size:13px;max-width:100%;box-sizing:border-box}.primary-suggestion a{font-size:13px}.score-panel{gap:14px}
+@media(max-width:850px){.review-overview{grid-template-areas:"score" "photo"}}
+@media(max-width:480px){.score-panel{padding:22px;gap:12px}.score-value{font-size:76px}.primary-suggestion{padding:14px}}
+'''
+
 def region_preview(product,result,identity):
     x,y,w,h=product['bbox']
     return f'<svg class="region-preview" viewBox="{x} {y} {w} {h}" role="img" aria-label="{esc(product.get("label","Detected region"))}"><image href="/evidence/{identity}/original.png" width="{result["width"]}" height="{result["height"]}"/></svg>'
@@ -67,6 +80,8 @@ def render_result(record, error=None):
     wording={item['finding_id']:item for item in approved_wording(result)}
     checks={c['identifier']:c for c in result['checks']}
     score=result.get('quality_score')
+    options=story_options(result);story=deterministic_story(options)
+    story_actions={item['id']:item for item in story['actions']}
     def scope(finding_id):
         if finding_id.startswith('photo.'):return 'Photo'
         region=int(finding_id.split('.')[0].split('-')[-1])
@@ -80,46 +95,82 @@ def render_result(record, error=None):
     for number,product in enumerate(products,1):
         local=[checks[i] for i in product['finding_ids'] if i in checks]
         state=str(aggregate([CheckResult(**c) for c in local]))
-        signals=[]
-        for key in ('detail','blur','noise','edge'):
-            check=next((c for c in local if c['identifier'].endswith('.'+key)),None)
-            value='Unassessed' if check is None else check['status']
-            display='Review' if value=='Manual Review' else value
-            color='fail-state' if value=='Fail' else '' if value=='Pass' else 'review-state'
-            signals.append(f'<div class="product-signal"><span>{esc(LABELS[key])}</span><span class="signal-value {color}">{esc(display)}</span></div>')
-        first=product['finding_ids'][0]
+        region=product.get('region_id',product['number'])
+        expected=set(product['finding_ids'])
+        if score:expected.update(f'product-{region}.{key.split(".")[1]}' for key in WEIGHTS if key.startswith('product.'))
+        missing=sorted(expected-set(checks))
+        blockers=[c for c in local if c.get('required',True) and c['status']!='Pass']
+        if (missing or any(c['status']!='Fail' for c in blockers)) and state!='Fail':state='Manual Review'
+        blocking_html=''
+        for check in blockers:
+            fid=check['identifier'];kind='Confirmed problem' if check['status']=='Fail' else 'Needs a closer look'
+            title=PRODUCT_LABELS.get(fid.rsplit('.',1)[-1],'Product detail')
+            blocking_html+=(f'<div class="product-blocker" data-blocking-finding="{esc(fid)}"><strong>{kind}: {esc(title)}</strong>'
+                            f'<p data-finding-id="{esc(fid)}" data-blocker-statement>{esc(friendly_finding(check))}</p>'
+                            f'<a href="#evidence-{esc(fid)}">View this finding</a></div>')
+        for fid in missing:
+            blocking_html+=f'<div class="product-blocker" data-blocking-finding="{esc(fid)}"><strong>Needs a closer look: {esc(PRODUCT_LABELS.get(fid.rsplit(".",1)[-1],"Product detail"))}</strong><p>This part of the review did not finish. Review the photo again.</p></div>'
+        if not blockers and not missing:
+            blocking_html='<p class="product-clear">No concerns from the checks for this item.</p>'
+        first=blockers[0]['identifier'] if blockers else product['finding_ids'][0]
         label=esc(product.get('label','Product region'))
-        cards.append(f'<article class="product-card" id="product-{number}" data-intended-product="{number}"><div class="product-head"><span class="number">{number}</span><h3>{label}</h3></div>{badge(state)}{"".join(signals)}<a href="#evidence-{esc(first)}">View DIP evidence</a></article>')
+        cards.append(f'<article class="product-card" id="product-{number}" data-intended-product="{number}"><div class="product-head"><span class="number">{number}</span><h3>{label}</h3></div>{badge(state,'product')}{blocking_html}<a href="#evidence-{esc(first)}">See the review details</a></article>')
     # Group repeated advice by defect; uncertainty stays conditional and evidence-bound.
-    actions={}
-    for check in result['checks']:
-        if not check.get('required',True) or check['status'] in {'Pass','Disabled'}:continue
-        key=check['identifier'].rsplit('.',1)[-1]
-        if check.get('reason_code') in {'intended_group_unconfirmed','intended_group_missing','intended_coverage_unconfirmed'}:key='coverage'
-        if key not in actions:actions[key]=[]
-        actions[key].append(check)
-    ordered=sorted(actions.items(),key=lambda pair:(0 if any(c['status']=='Fail' for c in pair[1]) else 1 if pair[0]=='edge' else 3 if pair[0]=='coverage' else 2))
-    action_titles={'blur':'Check focus at full size','noise':'Check visible noise','edge':'Give the product more room',
-                   'coverage':'Confirm the intended products','resolution':'Use a larger original photo',
-                   'contrast':'Check product contrast','clipping':'Review bright and dark detail',
-                   'mask_completeness':'Check the full product outline','shadow_loss':'Restore dark detail',
-                   'highlight_loss':'Restore highlight detail','group_size':'Adjust the product framing',
-                   'group_placement':'Recenter the product group','group_margins':'Leave space around the products','detail':'Check product detail'}
-    fixes=[]
-    for key,group in ordered[:3]:
-        check=next((c for c in group if c['status']=='Fail'),group[0]);fid=check['identifier']
-        scopes=', '.join(dict.fromkeys(scope(c['identifier']) for c in group))
-        link='#coverage-question' if key=='coverage' else '#evidence-'+esc(fid)
-        fixes.append(f'<div class="action-item"><span class="action-scope">{esc(scopes)}</span><h3>{esc(action_titles.get(key,"Review this finding"))}</h3><p data-finding-id="{esc(fid)}" data-fix>{esc(wording[fid]["fix"])}</p><a href="{link}">Review evidence and next steps</a></div>')
-    fix_html=''.join(fixes) or '<p>No fixes are suggested for the assessed checks.</p>'
+    fixes=[];primary_html=''
+    for action in options['actions']:
+        item=story_actions[action['id']];fid=action['finding_ids'][0] if action['finding_ids'] else None
+        kind=action['kind'];target=action['target']
+        link=('/evidence/'+identity+'/original.png' if target=='original' else
+              '#coverage-question' if target=='selection' else '#evidence-'+esc(fid) if fid in checks else '#score-evidence')
+        attributes='target="_blank" rel="noopener"' if target=='original' else ''
+        assessment='To improve' if kind=='confirmed' else 'Needs a closer look'
+        fixes.append(f'<div class="action-item" data-action-kind="{kind}"><span class="action-scope">{assessment}: {esc(action["scope"])}</span><h3>{esc(action["title"])}</h3><p data-story-action="{esc(action["id"])}">{esc(item["text"])}</p><a href="{link}" {attributes}>See this area</a></div>')
+        if not primary_html:
+            control=(f'<form method="post" action="/reinspect" enctype="multipart/form-data"><input type="hidden" name="source_inspection_id" value="{identity}"><input type="hidden" name="submission_id" value="{uuid4()}"><button>Review this photo again</button></form>' if target=='reinspect' else
+                     f'<a class="button" href="{link}" {attributes} data-finding-id="{esc(fid or "")}">{esc(action["title"])}</a>')
+            primary_html=f'<section class="primary-suggestion" data-action-kind="{kind}" aria-label="Next step">{control}</section>'
+    fix_html=''.join(fixes)
+    next_steps=f'<section class="action-card"><h2>Make it even better</h2>{fix_html}</section>' if fixes else ''
+    if fixes and result['status']!='Pass':next_steps=next_steps.replace('Make it even better','What to do next')
+    content_class='review-content' if next_steps else 'review-content no-actions'
+    good_html=''.join(f'<span data-story-good="{esc(item["id"])}">{esc(item["text"])}</span> ' for item in story['good'])
+    strengths=f'<div class="story-strengths"><span class="eyebrow">What works</span><p>{good_html}</p></div>' if good_html else ''
     count=len(products)
     coverage=meta['coverage']
+    correction=(f'<p class="subtle">{count} product{"" if count==1 else "s"} selected. '
+                '<a href="#coverage-question">Change products (optional)</a></p>' if regions else '')
+    dependents=[c for c in result['checks'] if c.get('measurement',{}).get('blocked_by')=='photo.coverage']
+    selection_ids={'photo.coverage',*(c['identifier'] for c in dependents)} if dependents else set()
+    findings_html=''.join(evidence(c) for c in result['checks'] if c['identifier'] not in selection_ids)
+    if dependents:
+        pending=sum(c['withheld'] for c in score['components'] if c['component'] in selection_ids) if score else 0
+        findings_html+=(f'<section id="selection-blocker"><h3>Product selection and framing</h3>'
+                        f'<p>Framing waits for the same intended-product selection. {pending} points remain pending for this shared selection blocker. '
+                        'Each check keeps its own score weight. Focus findings remain independent.</p>'+
+                        ''.join(evidence(checks[identity]) for identity in ['photo.coverage',*(c['identifier'] for c in dependents)])+'</section>')
     score_value=f'{score["score"]}<small>/ 100</small>' if score else '<small>Not scored</small>'
+    assessment_summary=(f'<div class="assessment-summary"><p><strong>Confirmed problems:</strong> {score["confirmed_deductions"]} points deducted.</p>'
+                        f'<p><strong>Incomplete assessment:</strong> {score["uncertainty_withheld"]} points pending.</p></div>' if score else '')
     explanation=score_statement(score) if score else 'This saved inspection predates whole-photo scoring. Reinspect the original to use the current rules.'
-    coverage_html=(f'<div class="score-coverage"><div><span>Assessed coverage</span><strong>{score["assessed_coverage_percent"]}% of weighted checks</strong></div><div class="coverage-track" aria-hidden="true"><span style="width:{score["assessed_coverage_percent"]}%"></span></div><span>{score["uncertainty_withheld"]} points await review · <a href="#score-evidence">How scoring works</a></span></div>' if score else '')
+    required=[c for c in result['checks'] if c.get('required',True)]
+    completed=sum(c['status'] in {'Pass','Fail'} for c in required)
+    completion_percent=100*completed/len(required) if required else 0
+    coverage_html=(f'<div class="score-coverage"><div><span>Checks completed</span><strong>{completed} of {len(required)}</strong></div><div class="coverage-track" aria-hidden="true"><span style="width:{completion_percent}%"></span></div><span>Completed checks can pass or find a problem. <a href="#score-evidence">Score details</a></span></div>' if score else '')
     old=''
-    if meta.get('report_schema_version')!=2:
+    provenance=meta.get('provenance',{})
+    operation=provenance.get('operation')
+    corrected=operation=='correction' or (not provenance and meta.get('source_inspection_id'))
+    if corrected or meta.get('report_schema_version')!=2 or result['pipeline_version']!=PIPELINE_VERSION:
         old=f'<div class="historical-note"><p>Saved with earlier inspection rules. Original findings are preserved.</p><form method="post" action="/reinspect" enctype="multipart/form-data"><input type="hidden" name="source_inspection_id" value="{identity}"><input type="hidden" name="submission_id" value="{uuid4()}"><button>Reinspect this photo</button></form></div>'
+        if corrected:
+            measured=esc(provenance.get('measurement_version') or 'not recorded')
+            text=(f'<strong>Corrected selection</strong><br>Saved measurements retained ({measured}). Profile unchanged. '
+                  f'Correction/scoring: {esc(provenance.get("correction_version") or "not recorded")} / {esc(provenance.get("scoring_version") or "not recorded")}.')
+            if not provenance:
+                text='<strong>Historical derived report</strong><br>Its measurement origin was not recorded. Reinspect the original to establish current measurements.'
+            old=old.replace('Saved with earlier inspection rules. Original findings are preserved.',text)
+    elif operation=='reinspection':
+        old=f'<p class="provenance-note">Reprocessed original · new measurements and profile from {esc(provenance["measurement_version"])}.</p>'
     contexts=''.join(f'<article class="context-item">{region_preview(p,result,identity)}<div><h4>{esc(p.get("label","Detected region"))} · incidental</h4><p>{esc(p.get("intent_reason","Excluded by the saved intended-product selection."))}</p><a class="evidence-link" href="#evidence-{esc(p["finding_ids"][0])}">View retained findings</a></div></article>' for p in incidental)
     context_section=f'<section class="detail-section" id="incidental-context"><h3>Incidental context · {len(incidental)}</h3><p>Retained as scene evidence. These regions do not count as products or affect product scoring.</p><div class="context-list">{contexts}</div></section>' if incidental else ''
     choices=[]
@@ -131,15 +182,23 @@ def render_result(record, error=None):
     virtual={**result,'segmentation':{**meta,'product_locator':{}}}
     mark=marking_form(virtual).replace('Mark the target product','Mark a missing or merged product')
     override=f'<section class="detail-section"><details id="coverage-question"><summary>Override intended products or confirm coverage</summary><p>Automatic intent uses prominence, framing, and apparent completeness. Dominant cropped products remain eligible. Override the estimate if your intended subject differs.</p>{confirm}<details><summary>Mark a missing or merged product</summary>{mark}</details></details></section>'
-    ledger=''
+    ledger=old+f'<section class="detail-section">{assessment_summary}{coverage_html}<p id="score-explanation">{esc(explanation)}</p></section>'
+    if provenance:
+        ledger+=f'<section class="detail-section"><h3>Measurement and correction history</h3><pre>{esc(json.dumps(provenance,indent=2))}</pre></section>'
     if score:
         rows=[]
         for c in score['components']:
-            links=' '.join(f'<a href="#evidence-{esc(fid)}">{esc(scope(fid))}</a>' for fid in c['finding_ids'])
+            links=' '.join(f'<a href="#evidence-{esc(fid)}">{esc(scope(fid))}</a>' if fid in checks else '<span>Not recorded</span>' for fid in c['finding_ids'])
             rows.append(f'<tr><td>{esc(LABELS[c["component"].split(".")[1]])}</td><td>{c["weight"]}</td><td>{c["earned"]}</td><td>{c["deducted"]}</td><td>{c["withheld"]}</td><td>{links or "No product region"}</td></tr>')
-        ledger=f'<section class="detail-section" id="score-evidence"><h3>Score deductions and uncertainty</h3><p>{score["confirmed_deductions"]} points deducted for confirmed findings. {score["uncertainty_withheld"]} withheld for uncertainty. Possible range: {score["possible_range"][0]}–{score["possible_range"][1]}/100. Missing checks earn no credit.</p><p>{esc(score["method"])}</p><div class="evidence-table-wrap"><table class="evidence-table"><thead><tr><th>DIP check</th><th>Weight</th><th>Earned</th><th>Deducted</th><th>Withheld</th><th>Evidence</th></tr></thead><tbody>{"".join(rows)}</tbody></table></div><p>{esc(score["limitation"])}</p></section>'
+        if score.get('verdict_policy'):
+            rule=score['verdict_policy']
+            threshold=f'{rule["pass_threshold"]}/100' if rule['pass_threshold'] is not None else 'Invalid setting'
+            rows.insert(0,f'<tr><td colspan="6">Provisional Pass threshold: {esc(threshold)}. Essential evidence: {esc(rule["essential_checks"])}. Critical defects block Pass. Decision: {esc(score["verdict_reason"])}. Per-check verdict: {esc(score["check_verdict"])}</td></tr>')
+        ledger+=f'<section class="detail-section" id="score-evidence"><h3>Score deductions and uncertainty</h3><p>DIP verdict: {esc(score["verdict"])}. Assessed coverage: {score["assessed_coverage_percent"]}% of weighted checks.</p><p>{score["confirmed_deductions"]} points deducted for confirmed findings. {score["uncertainty_withheld"]} withheld for uncertainty. Possible range: {score["possible_range"][0]}–{score["possible_range"][1]}/100. Missing checks earn no credit.</p><p>{esc(score["method"])}</p><div class="evidence-table-wrap"><table class="evidence-table"><thead><tr><th>DIP check</th><th>Weight</th><th>Earned</th><th>Deducted</th><th>Withheld</th><th>Evidence</th></tr></thead><tbody>{"".join(rows)}</tbody></table></div><p>{esc(score["limitation"])}</p></section>'
+    if meta.get('timings'):
+        ledger+=f'<section class="detail-section" id="processing-time"><h3>Processing time</h3><p>{result["duration_ms"]/1000:.2f} seconds for this inspection. Upload response Server-Timing also measures storage and application request time.</p><pre>{esc(json.dumps(meta["timings"],indent=2))}</pre></section>'
     error_notice=f'<p role="alert" class="notice error">{esc(error)}</p>' if error else ''
-    return page('Photo review',f'''<div class="review">{error_notice}<div class="review-top"><div><span class="eyebrow">Inspection complete</span><h1>Your photo review.</h1><p>{esc(record['filename'])}</p></div><div class="review-links"><a href="/report/{identity}.json">Download report</a><a href="/">Inspect another photo</a></div></div>{old}<section class="review-overview" id="whole-photo-score"><figure class="review-photo">{numbered_photo(result,identity)}<figcaption><span>Original photo · {count} intended product{'' if count==1 else 's'}</span><a href="/evidence/{identity}/original.png" target="_blank" rel="noopener">Open original</a></figcaption></figure><div class="score-panel"><span class="score-label">Whole-photo quality</span><div class="score-value" data-quality-score>{score_value}</div>{badge(score['verdict'] if score else result['status'],'verdict')}<p id="score-explanation">{esc(explanation)}</p>{coverage_html}</div></section><div class="review-content"><section><div class="review-section-title"><h2>Intended products</h2><span data-product-count="{count}">{count} product{'' if count==1 else 's'} assessed</span></div><div class="product-cards">{''.join(cards) or '<p>No intended products located. Available photo findings remain under Details.</p>'}</div></section><section class="action-card"><h2>What to do next</h2>{fix_html}</section></div><details class="review-details" id="inspection-details"><summary>Details <span>Incidental items, uncertainty &amp; DIP evidence</span></summary>{context_section}{override}{ledger}<section class="detail-section"><h3>Findings and measurements</h3><p>{esc(coverage['reason'])} {esc(coverage['disclosure'])}</p>{''.join(evidence(c) for c in result['checks'])}</section><section class="detail-section"><h3>Masks and calibration</h3><p>{esc(meta['calibration_disclosure'])}</p><div class="evidence"><figure><img src="/evidence/{identity}/mask.png" alt="Combined detection mask, including incidental regions"><figcaption>All detected regions, including context</figcaption></figure><figure><img src="/evidence/{identity}/overlay.png" alt="Estimated detection regions"><figcaption>Estimated masks, not verified outlines</figcaption></figure></div><p class="source" id="explanation-source">Local wording · available immediately</p><a href="/?advanced=1">Advanced manual inspection tools</a></section></details><p class="review-footnote">DIP evidence determines this provisional assessment. Photo and product checks keep their calibration limits.</p></div><script>
+    return page('Photo review',f'''<div class="review">{error_notice}<div class="review-top"><div><span class="eyebrow">Photo result</span><h1>Photo review.</h1><p>{esc(record['filename'])}</p></div><div class="review-links"><a href="/report/{identity}.json">Download report</a><a href="/">Inspect another photo</a></div></div><section class="review-overview" id="whole-photo-score"><div class="score-panel"><span class="score-label">Your photo review</span><h2 id="story-headline">{esc(story["headline"])}</h2><div class="result-rating"><div class="score-value" data-quality-score>{score_value}</div>{badge(score['verdict'] if score else result['status'],'verdict')}</div><p id="story-summary">{esc(story["summary"])}</p>{strengths}{primary_html}{correction}</div><figure class="review-photo">{numbered_photo(result,identity)}<figcaption><span>Original photo · {count} intended product{'' if count==1 else 's'}</span><a href="/evidence/{identity}/original.png" target="_blank" rel="noopener">Open original</a></figcaption></figure></section><div class="{content_class}"><section><div class="review-section-title"><h2>Products in this review</h2><span data-product-count="{count}">{count} product{'' if count==1 else 's'} assessed</span></div><div class="product-cards">{''.join(cards) or '<p>No intended products located. Available photo findings remain under Details.</p>'}</div></section>{next_steps}</div><details class="review-details" id="inspection-details"><summary>Details <span>Measurements, photo checks &amp; review history</span></summary>{context_section}{override}{ledger}<section class="detail-section"><h3>Findings and measurements</h3><p>{esc(coverage['reason'])} {esc(coverage['disclosure'])}</p>{findings_html}</section><section class="detail-section"><h3>Masks and calibration</h3><p>{esc(meta['calibration_disclosure'])}</p><div class="evidence"><figure><img src="/evidence/{identity}/mask.png" alt="Combined detection mask, including incidental regions"><figcaption>All detected regions, including context</figcaption></figure><figure><img src="/evidence/{identity}/overlay.png" alt="Estimated detection regions"><figcaption>Estimated masks, not verified outlines</figcaption></figure></div><p class="source" id="explanation-source">Local wording · available immediately</p><a href="/?advanced=1">Advanced manual inspection tools</a></section><p class="review-footnote">DIP evidence determines this provisional assessment. Photo and product checks keep their calibration limits.</p></details></div><script>
 document.addEventListener('click',event=>{{
  const anchor=event.target.closest('a[href^="#"]');if(!anchor)return;
  const target=document.getElementById(anchor.getAttribute('href').slice(1));if(!target)return;
@@ -152,6 +211,16 @@ fetch('/explanation/{identity}.json').then(r=>r.ok?r.json():Promise.reject()).th
   for(const node of document.querySelectorAll('[data-fix]'))if(node.dataset.findingId===item.finding_id)node.textContent=item.fix;
  }}
  if(data.score_explanation)document.getElementById('score-explanation').textContent=data.score_explanation;
+ if(data.story){{
+  document.getElementById('story-headline').textContent=data.story.headline;
+  document.getElementById('story-summary').textContent=data.story.summary;
+  const strengths=document.querySelector('.story-strengths p');
+  if(strengths){{
+   strengths.replaceChildren();
+   for(const item of data.story.good){{const node=document.createElement('span');node.dataset.storyGood=item.id;node.textContent=item.text;strengths.append(node,document.createTextNode(' '));}}
+  }}
+  for(const item of data.story.actions)for(const node of document.querySelectorAll('[data-story-action]'))if(node.dataset.storyAction===item.id)node.textContent=item.text;
+ }}
  document.getElementById('explanation-source').textContent=data.source==='groq_validated'?'Groq wording validated against backend DIP evidence':'Local wording · '+(data.reason||'backend evidence preserved');
 }}).catch(()=>{{}});
 </script>''')
@@ -160,3 +229,15 @@ fetch('/explanation/{identity}.json').then(r=>r.ok?r.json():Promise.reject()).th
 def history(rows):
     items=''.join(f'<div class="history-row"><div><a href="/inspection/{esc(r["id"])}">{esc(r["filename"])}</a><p class="subtle">{esc(r["created_at"][:19].replace("T"," "))} UTC</p></div>{badge(r["status"])}</div>' for r in rows)
     return page('Saved inspections',f'<div class="result-head"><div><span class="eyebrow">Your workspace</span><h1>Saved inspections</h1></div><a class="button" href="/">Inspect a photo</a></div><section class="card">{items or "<p>No inspections saved yet.</p>"}</section>')
+
+CSS += '''
+.product-blocker{margin:10px 0;padding:10px;border-left:3px solid #c28c36;background:#fff8e9;font-size:12px;overflow-wrap:anywhere}.product-blocker p{font-size:12px;margin:5px 0}.product-blocker a{font-size:12px}.assessment-summary p{font-size:13px}.provenance-note{font-size:13px;margin:12px 0}
+'''
+
+CSS += '''
+.review-overview{grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);box-shadow:0 14px 50px #233b2c06}.review-top h1{font-size:25px;letter-spacing:-.7px}.score-panel{padding:32px;gap:16px}.score-panel #story-headline{font-size:clamp(28px,3vw,40px);letter-spacing:-1.3px;line-height:1.14;margin:0;color:#153d30}.result-rating{display:flex;align-items:center;gap:22px;flex-wrap:wrap}.score-value{font-size:62px;letter-spacing:-3px}.score-value small{font-size:20px}.score-panel #story-summary{font-size:16px;line-height:1.6}.story-strengths{border-left:3px solid #a8c5ae;padding:0 0 0 13px}.story-strengths .eyebrow{font-size:10px;letter-spacing:.1em}.story-strengths p{font-size:14px;margin-top:5px}.primary-suggestion{padding:0;border:0;background:none}.primary-suggestion .button{padding:11px 17px}.review-content{grid-template-columns:minmax(0,1.2fr) minmax(0,1fr)}.product-card .product-head{margin-bottom:9px}.product-blocker{padding:9px 0 9px 10px;border-left:2px solid #d6b46b;background:#fffaf1;border-radius:0 6px 6px 0}.product-blocker strong{font-size:11px;font-weight:650}.product-blocker p{font-size:13px;line-height:1.55}.product-blocker a{font-size:11px}.product-clear{font-size:13px}.action-card{background:#fff;border-color:#dce6de;padding:25px}.action-card h2{font-size:21px}.action-scope{font-size:10px;letter-spacing:.04em}.action-item h3{font-size:16px}.action-item p{font-size:14px}.review-top p{overflow-wrap:anywhere}.review-details pre{max-width:100%}.product-card{overflow-wrap:anywhere}
+@media(max-width:850px){.review-overview{grid-template-columns:1fr}.review-content{grid-template-columns:1fr}.review-photo svg{max-height:300px}.score-panel{padding:25px;gap:12px}.review-photo{padding:16px}.review-overview{grid-template-areas:"score" "photo"}}
+@media(max-width:480px){.review-top{margin:14px 0 18px}.review-top h1{font-size:23px}.score-panel{padding:22px;gap:10px}.score-panel #story-headline{font-size:29px;letter-spacing:-.8px}.score-value{font-size:48px;letter-spacing:-2px}.score-value small{font-size:17px}.result-rating{gap:17px}.score-panel #story-summary{font-size:14px}.story-strengths p{font-size:13px}.review-photo svg{max-height:250px}.review-content{gap:24px}.review-photo figcaption{font-size:11px}.score-panel .subtle{font-size:12px}.review-details>summary span{font-size:11px}}
+'''
+
+CSS += '''.review-content.no-actions{grid-template-columns:1fr}'''

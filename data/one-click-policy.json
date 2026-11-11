@@ -1,6 +1,9 @@
 {
   "name": "Normal-resolution DIP pilot",
   "feature_version": "normal-dip-v1",
+  "score_verdict": {
+    "pass_threshold": 75
+  },
   "metrics": {
     "photo.blur": {
       "direction": "low",

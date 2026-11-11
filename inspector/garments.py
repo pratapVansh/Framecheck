@@ -28,6 +28,26 @@ def prepare_segformer_input(rgb, config):
     return np.ascontiguousarray(((pixels - mean) / std).transpose(2, 0, 1)[None])
 
 
+def _native_labels(logits, size):
+    """Interpolate every class at native coordinates without retaining all native logits."""
+    import torch
+
+    if size[0]*size[1]<=logits.shape[-2]*logits.shape[-1]:
+        return torch.nn.functional.interpolate(
+            logits,size=size,mode="bilinear",align_corners=False).argmax(dim=1)
+    best = torch.nn.functional.interpolate(
+        logits[:, :1], size=size, mode="bilinear", align_corners=False)[:, 0]
+    labels = torch.zeros(best.shape, dtype=torch.int64, device=logits.device)
+    for index in range(1, logits.shape[1]):
+        candidate = torch.nn.functional.interpolate(
+            logits[:, index:index + 1], size=size, mode="bilinear", align_corners=False)[:, 0]
+        # Strict comparison preserves argmax's first-index ties, including the first NaN.
+        replace = (candidate > best) | (torch.isnan(candidate) & ~torch.isnan(best))
+        best = torch.where(replace, candidate, best)
+        labels.masked_fill_(replace, index)
+    return labels
+
+
 def load_shirt_model(folder):
     """Load local safe weights only; missing weights must never become fake predictions."""
     folder = Path(folder)
@@ -56,8 +76,7 @@ def load_shirt_model(folder):
         pixels = torch.from_numpy(prepare_segformer_input(rgb, preprocessing)).to(device)
         with torch.inference_mode():
             logits = model(pixel_values=pixels).logits
-            logits = torch.nn.functional.interpolate(logits, size=rgb.shape[:2], mode="bilinear", align_corners=False)
-            labels = logits.argmax(dim=1)[0].cpu().numpy()
+            labels = _native_labels(logits, rgb.shape[:2])[0].cpu().numpy()
             mask = labels == 4
         if device == "cuda":
             torch.cuda.synchronize()

@@ -125,7 +125,7 @@ def test_person_associated_products_do_not_require_an_upper_clothes_label(monkey
 def test_coverage_review_is_listed_with_other_available_findings(monkeypatch):
     rgb,labels=person_scene()
     mask=labels==4
-    monkeypatch.setattr(auto_inspect,'detect',lambda image:([mask],{
+    monkeypatch.setattr(auto_inspect,'detect',lambda image, **kwargs:([mask],{
         'method':'test','coverage_complete':False,'reason':'An unexplained object remains.','disclosure':'Test'}))
     result=inspect_auto(png_bytes(rgb))
     record={'result_json':result.to_json(),'filename':'test-only-scene.png'}
@@ -138,16 +138,17 @@ def test_coverage_review_is_listed_with_other_available_findings(monkeypatch):
 def test_product_failure_wins_without_changing_other_items(monkeypatch):
     rgb,labels=person_scene()
     masks=[labels==4,labels==6]
-    monkeypatch.setattr(auto_inspect,'detect',lambda image:(masks,{
+    monkeypatch.setattr(auto_inspect,'detect',lambda image, **kwargs:(masks,{
         'method':'test','coverage_complete':False,'reason':'Unknown target.','disclosure':'Test'}))
     original=auto_inspect.product_findings
     def local(image,mask,number,policy):
         checks,item=original(image,mask,number,policy)
         if number==2:
-            checks[0]=auto_inspect.finding('product-2.detail','Fail','Confirmed test-only failure.')
+            check=next(c for c in checks if c.identifier=='product-2.noise')
+            check.status='Fail';check.explanation='Confirmed critical test-only failure.'
         return checks,item
     monkeypatch.setattr(auto_inspect,'product_findings',local)
     result=inspect_auto(png_bytes(rgb))
-    assert result.status=='Fail'
+    assert result.status=='Needs Improvement'
     assert next(c for c in result.checks if c.identifier=='photo.coverage').status=='Manual Review'
     assert next(c for c in result.checks if c.identifier=='product-1.detail').status=='Pass'

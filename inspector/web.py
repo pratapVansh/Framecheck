@@ -10,6 +10,7 @@ from pathlib import Path
 import re
 import sqlite3
 import threading
+import time
 from urllib.parse import parse_qs, urlencode, urlparse
 from uuid import UUID, uuid4
 
@@ -260,7 +261,18 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(303)
         self.send_header("Location", path)
         self.send_header("Content-Length", "0")
+        if hasattr(self,'request_started'):
+            timing=f'request;dur={(time.perf_counter()-self.request_started)*1000:.2f}'
+            if hasattr(self,'storage_ms'):
+                timing+=f', processing;dur={self.processing_ms:.2f}, storage;dur={self.storage_ms:.2f}'
+            self.send_header('Server-Timing',timing)
         self.end_headers()
+
+    def save_result(self, result, filename):
+        started=time.perf_counter()
+        save_inspection(result,filename,self.server.database)
+        self.storage_ms=(time.perf_counter()-started)*1000
+        self.processing_ms=result.duration_ms
 
     def do_GET(self):
         parsed = urlparse(self.path)
@@ -342,6 +354,7 @@ class Handler(BaseHTTPRequestHandler):
         return fields, files
 
     def do_POST(self):
+        self.request_started=time.perf_counter()
         fields = {}
         source = None
         try:
@@ -355,7 +368,8 @@ class Handler(BaseHTTPRequestHandler):
                 result=inspect_auto(source['original_png'])
                 result.inspection_id=identity
                 result.segmentation['source_inspection_id']=source['id']
-                save_inspection(result,source['filename'],self.server.database)
+                result.segmentation['provenance']['operation']='reinspection'
+                self.save_result(result,source['filename'])
                 return self.redirect('/inspection/'+identity)
             if self.path == '/confirm-coverage':
                 identity=str(UUID(fields.get('submission_id','')))
@@ -370,7 +384,7 @@ class Handler(BaseHTTPRequestHandler):
                               if name.startswith('intended_') and value=='yes']
                 result=amend_inspection(source,confirm_coverage=True,intended_numbers=intended)
                 result.inspection_id=identity
-                save_inspection(result,source['filename'],self.server.database)
+                self.save_result(result,source['filename'])
                 return self.redirect('/inspection/'+identity)
             if self.path in {"/select-shirt", "/select-product", "/mark-product"}:
                 identity = str(UUID(fields.get("submission_id", "")))
@@ -392,7 +406,7 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     result = select_shirt_target(source, int(fields.get("shirt_target", "")))
                 result.inspection_id = identity
-                save_inspection(result, source["filename"], self.server.database)
+                self.save_result(result,source['filename'])
                 return self.redirect("/inspection/" + identity)
             if self.path == "/inspect":
                 identity = str(UUID(fields.get("submission_id", "")))
@@ -402,7 +416,7 @@ class Handler(BaseHTTPRequestHandler):
                     filename,data=files.get('image',('',b''))
                     result=inspect_auto(data)
                     result.inspection_id=identity
-                    save_inspection(result,filename,self.server.database)
+                    self.save_result(result,filename)
                     return self.redirect('/inspection/'+identity)
                 profiles = available_profiles()
                 if fields.get("profile") not in profiles:
