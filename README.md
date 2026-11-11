@@ -4,11 +4,11 @@
 
 Framecheck reviews a product photograph, shows what looks good, and points to the areas that need attention. It combines explainable **Digital Image Processing (DIP)** with optional garment localization and friendly, evidence-grounded explanations.
 
-**Runs locally ? Reviews multiple products ? Preserves inspection history ? Works without an API key**
+**Runs locally · Reviews multiple products · Preserves inspection history · Works without an API key**
 
-> **Course prototype ? HSR-AIML-056:** Automated E-commerce Image Quality and Compliance Inspector. Its thresholds and score weights are provisional. A passing result means the configured review requirements were met; it is not a marketplace approval or a guarantee that every defect was detected.
+> **Course prototype · HSR-AIML-056:** Automated E-commerce Image Quality and Compliance Inspector. Its thresholds and score weights are provisional. A passing result means the configured review requirements were met; it is not a marketplace approval or a guarantee that every defect was detected.
 
-[Get started](#get-started) ? [Use Framecheck](#use-framecheck) ? [Understand your result](#understand-your-result) ? [How it works](#how-it-works) ? [Optional features](#optional-features) ? [Troubleshooting](#troubleshooting)
+[Get started](#get-started) · [Use Framecheck](#use-framecheck) · [Understand your result](#understand-your-result) · [How it works](#how-it-works) · [Optional features](#optional-features) · [Troubleshooting](#troubleshooting)
 
 ## What it does
 
@@ -21,7 +21,7 @@ Upload a photo and receive:
 - **Expandable evidence:** measurements, masks, score accounting, calibration limits, and inspection history.
 - **A saved report:** revisit the result or download its JSON evidence.
 
-When the evidence supports an all-clear result, Framecheck says **?Your photo looks good.?** An incomplete check is explained separately from a confirmed problem.
+When the evidence supports an all-clear result, Framecheck says **"Your photo looks good."** An incomplete check is explained separately from a confirmed problem.
 
 ### Checks at a glance
 
@@ -62,18 +62,26 @@ python3 -m venv .venv
 .venv/bin/python app.py --port 8505
 ```
 
-Open **http://127.0.0.1:8505/**. The application creates its local SQLite database when an inspection is saved. Restart the Python process after changing backend code.
+Open **[http://127.0.0.1:8505/](http://127.0.0.1:8505/)**.
 
-## Inspect a photo
+These examples choose port **8505**. Without `--port`, the app uses **8501**. Stop the server with **Ctrl+C**. Restart it after application-code or model-weight changes. SQLite storage is created as needed.
 
-1. Upload or drop a nonanimated JPEG/PNG, up to 10 MiB and 24 megapixels.
-2. Read the completed whole-photo and numbered-product findings.
-3. Uncheck incidental items, such as trousers in a tops-only listing.
-4. Mark missing products. If a candidate merges several items, mark them separately and exclude the merged candidate.
-5. Confirm that every intended product is numbered. New inspections remain Review until this step; a supported single-product result can then Pass.
-6. Open **Details** for masks, scores, thresholds, calibration notes, or the downloadable JSON report.
+<details>
+<summary>Pinned dependencies and a separate inspection history</summary>
 
-Confirmation establishes user intent. It **does not verify mask accuracy** or clear outstanding quality/mask Reviews. Marking and confirmation save new child inspections; earlier reports remain unchanged. Advanced category/profile tools are available at `/?advanced=1`.
+`pip install .` uses the dependency ranges in [pyproject.toml](pyproject.toml). [requirements.txt](requirements.txt) is the pinned snapshot verified on Windows with Python 3.14.5; install it instead when reproducing that environment:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
+To use a separate database:
+
+```powershell
+.\.venv\Scripts\python.exe app.py --port 8505 --database data/demo-inspections.sqlite3
+```
+
+</details>
 
 ## First-time setup notes
 
@@ -82,12 +90,223 @@ Confirmation establishes user intent. It **does not verify mask accuracy** or cl
 - Keep the virtual environment active by using its Python executable for subsequent commands.
 - The application runs locally and can be accessed through your browser.
 - No Groq API key or pretrained model weights are required for the standard inspection workflow.
-  
-### Optional clothing localization
 
-Plain-background foreground inspection works without SegFormer. To enable the existing local clothing parser, install the optional garment dependencies and supply the matching checkpoint weights as described in [models/README.md](models/README.md).
+## Use Framecheck
 
-The weights are not included in Git. No model is automatically downloaded or trained. Without suitable localization, available photo findings remain visible and the user can mark a product.
+### 1. Upload an original photo
+
+Choose **Upload a product photo** or drag a file onto the upload area. The standard page submits the selected image automatically.
+
+| Input | Limit or behavior |
+| --- | --- |
+| Format | Nonanimated JPEG or PNG |
+| File size | Up to **10 MiB** |
+| Image dimensions | Up to **24 megapixels** |
+| Orientation | EXIF orientation is applied before inspection |
+| Transparency | Composited against white, with the conversion recorded |
+| Grayscale | Converted to RGB, with the conversion recorded |
+
+Use an original when available. Enlarging a small image does not restore its missing detail.
+
+### 2. Read the result
+
+The page brings the photo, saved verdict, score and short summary together. It shows supported strengths and at most three useful actions. Numbered markers connect the photograph to the product cards.
+
+Each action identifies **Photo**, **Product 1**, **Product 2**, or the affected group. Related issues are grouped instead of repeating the same task. Incomplete checks do not confirm a defect. All-clear results do not add filler advice.
+
+### 3. Correct the selected products only if needed
+
+Use **Change products (optional)** if an incidental item was included or an intended item was excluded. Select at least one intended item, restore or uncheck regions as appropriate, then save the selection.
+
+Reliable automatic selections do not require confirmation before a result. Selection uses relative prominence, geometry, edge contact and apparent completeness; it does not hard-code categories. Lone and dominant cropped products remain assessable.
+
+### 4. Mark a missing or merged product
+
+Open the selection controls, then **Mark a missing or merged product**.
+
+1. Mark the visible outline of the missing item.
+2. When a candidate merges several products, mark each intended product separately.
+3. Exclude the combined candidate if it would duplicate the separately marked items.
+4. Select the intended items and confirm the resulting coverage.
+
+**Confirmation establishes intent, not mask accuracy.** It cannot clear independent focus uncertainty or an incomplete-outline warning. Corrections create new child reports; earlier reports remain unchanged.
+
+### 5. Explore evidence or saved history
+
+Open **Details** for masks, measurements, score accounting, calibration and provenance. Use **Download report** for JSON or **Saved inspections** to revisit earlier results.
+
+Advanced category/profile tools are available at **[/?advanced=1](http://127.0.0.1:8505/?advanced=1)** when using the example port.
+
+### Everyday workflow
+
+```mermaid
+flowchart TD
+    A[Upload a JPEG or PNG] --> B[Read photo, verdict, score and summary]
+    B --> C{Does the product selection match your listing?}
+    C -- Yes --> D[Follow the relevant suggestions]
+    C -- No --> E[Change selected items or mark missing products]
+    E --> F[Save a corrected child report]
+    F --> D
+    D --> G[Open Details when more evidence is useful]
+    G --> H[Download the report or revisit saved inspections]
+```
+
+## Understand your result
+
+| Verdict | Meaning | Next step |
+| --- | --- | --- |
+| **Pass** | The score meets the threshold, essential evidence is complete, and no required critical failure blocks approval | Use the result with its stated limits; apply any specific noncritical improvements |
+| **Needs Improvement** | A confirmed critical failure exists, supported severe framing blocks approval, or a complete score falls below the threshold | Address the confirmed problems and review a suitable original again |
+| **Needs Review** | Required evidence is incomplete or the score policy is invalid | Read the specific uncertainty and inspect the original or correct the selection as appropriate |
+
+A high score can still need review. **86/100 with 14 points pending for focus** does not establish that the photo is blurry. It means focus has not been resolved confidently enough to approve it.
+
+A passing photo can still have a noncritical improvement. Pass requires complete evidence, sufficient points and no critical blocker; it does not require every individual finding to be Pass.
+
+### Score graph
+
+This is the **declared point budget**, not measured accuracy or the percentage of image area inspected.
+
+```mermaid
+pie showData
+    title Fixed 100-point review budget
+    "Whole-photo checks" : 50
+    "Intended-product checks" : 30
+    "Group framing" : 10
+    "Intended-product coverage" : 10
+```
+
+```text
+Score = 100 - confirmed deductions - points pending incomplete checks
+```
+
+- Passing components earn points; failing components lose them.
+- Incomplete, disabled or missing components earn no points while unresolved.
+- Product components apply once across intended products, using the worst applicable state. Extra products do not multiply the 30-point product budget.
+- Excluded regions retain evidence without determining product scoring.
+- If one product fails a component and another is unassessed, the weight is deducted once; the unresolved finding still blocks approval.
+
+The possible range adds pending points to the score. It is **not a statistical confidence interval**. Assessed coverage means decisive check weight, not product-detection recall, image area or verified mask accuracy.
+
+### Verdict decision flow
+
+The default Pass threshold is **75/100**.
+
+```mermaid
+flowchart TD
+    A[Backend findings and fixed point budget] --> B{Valid score policy?}
+    B -- No --> R[Needs Review]
+    B -- Yes --> C{Confirmed critical failure or severe framing?}
+    C -- Yes --> I[Needs Improvement]
+    C -- No --> D{All essential evidence complete?}
+    D -- No --> R
+    D -- Yes --> E{Score at least 75?}
+    E -- No --> I
+    E -- Yes --> P[Pass]
+```
+
+This diagram uses the default threshold. Each inspection saves its effective policy. Invalid policy requests Review before other gates. Supported severe framing blocks approval; mild isolated framing failures can remain ordinary deductions.
+
+See [Quality score and evidence policy](docs/quality-score.md) for exact weights, critical checks and severity rules. Changing a threshold changes policy; it does not improve a photograph or establish inspection accuracy.
+
+## How it works
+
+### Architecture graph
+
+```mermaid
+flowchart LR
+    subgraph Browser[Local browser]
+        U[Upload and product correction]
+        V[Photo, verdict, score and friendly review]
+        D[Expandable Details]
+    end
+    subgraph App[Python application on localhost]
+        W[HTTP handlers and validation]
+        L[Foreground or garment localization]
+        Q[Photo and product DIP measurements]
+        S[Scoring and verdict policy]
+        T[Evidence-grounded story builder]
+        G[Groq response validation]
+        C[Bounded localization and PNG caches]
+    end
+    DB[(Local SQLite history and image evidence)]
+    API[Optional Groq API]
+    U --> W
+    W --> L
+    L --> Q
+    Q --> S
+    S --> T
+    T --> V
+    Q --> D
+    W --> DB
+    DB --> V
+    L <--> C
+    W <--> C
+    T -. Approved text, references and score evidence .-> API
+    API -. Proposed story wording .-> G
+    G --> V
+```
+
+**DIP measures the image. Backend policy decides the result. Optional models assist localization or wording.**
+
+### Image-processing flow
+
+```mermaid
+flowchart TD
+    A[Uploaded image bytes] --> B[Validate type, limits and frame count]
+    B --> C[Apply orientation and prepare native RGB pixels]
+    C --> D[Whole-photo measurements at analysis scale]
+    C --> E[Analysis image with long side at most 512 px]
+    E --> F[Classical foreground segmentation]
+    E --> G[Optional person-associated clothing parser]
+    F --> H[Candidate regions in native coordinates]
+    G --> H
+    H --> I[Per-product measurements and outline warnings]
+    I --> J[Estimate intended versus incidental regions]
+    J --> K[Assess intended coverage and native group framing]
+    D --> L[Fixed score budget and verdict gates]
+    I --> L
+    K --> L
+    L --> M[Save report, original, mask and overlay]
+    M --> N[Render immediate local summary]
+    N -. Optional wording request .-> O[Validate Groq story or retain local fallback]
+```
+
+| Stage | Technique | Boundary |
+| --- | --- | --- |
+| Input preparation | Pillow decoding, orientation handling, RGB conversion and size limits | Original dimensions are preserved |
+| General localization | Lab border-color estimation, thresholding, morphology, connected components and guarded GrabCut refinement | Foreground regions are not verified product identities |
+| Clothing localization | Optional local pretrained SegFormer associated with person-scene evidence | Semantic garment labels do not prove separate product instances |
+| Focus and detail | Laplacian/Sobel measurements and usable-pixel support | Unsupported Fail ranges and uncertainty bands remain Review |
+| Contrast and exposure | Tonal percentiles, dark/bright fractions and severe detail-loss indicators | Natural black, white or uniform material can resemble a problem |
+| Graininess | Filter responses and robust statistics in comparatively flat regions | An estimate, not a calibrated camera-noise model |
+| Framing | Selected group bounds in original frame coordinates | Each individual product need not be centered |
+| Explanation | Supported wording with finding references and certainty | Generated text cannot change findings or approval |
+
+Mostly blank backgrounds do not automatically establish poor product contrast. A narrow supported focus rule can use passing product checks while retaining the original whole-photo observation. It does not clear unresolved product focus or calibration uncertainty.
+
+### Who owns each decision?
+
+| Component | Responsibility | Does not own |
+| --- | --- | --- |
+| Classical DIP | Measurable image evidence and region-quality checks | Guaranteed product identity |
+| Optional SegFormer | Candidate clothing masks | Scores, verdicts, verified instances or human-approved outlines |
+| Backend policy | Applicability, fixed weights, critical gates and the saved verdict | Marketplace approval |
+| Optional Groq | Friendly wording from supplied evidence-approved alternatives | New findings, causes, scores, verdicts or unsupported advice |
+| User correction | Which visible products should be included | Proof that a mask or an uncertain quality check is correct |
+
+## Corrections, reinspection and history
+
+A correction creates a **new child inspection**, without overwriting its parent.
+
+| Operation | Retained | New |
+| --- | --- | --- |
+| Change selected products | Original measurements, saved profile and existing evidence | Applicability, selected-group assessment, score and correction/scoring provenance |
+| Mark a product | Inherited measurements and saved profile | Added-region measurements/version and any new mask/overlay evidence |
+| Reinspect the original | Saved original image and a link to the earlier report | Current rules/profile and a current inspection; valid localization may be safely reused |
+| Reopen a saved report | Saved findings, policy, verdict and measurement history | Current presentation and grounded wording; no retrospective score recalculation on read |
+
+Details distinguishes **Corrected selection** from **Reprocessed original**. Measurement, profile, correction and scoring versions are separate. Missing origins in older derived reports are disclosed, not relabelled as current measurements.
 
 ## Optional features
 
